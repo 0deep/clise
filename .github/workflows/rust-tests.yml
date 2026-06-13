@@ -19,7 +19,7 @@ jobs:
         os: [ubuntu-latest, ubuntu-24.04-arm, macos-13, macos-latest]
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
