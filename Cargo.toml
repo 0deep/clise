@@ -8,5 +8,5 @@ serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = { version = "=1.0.150", features = ["preserve_order"] }
 serde-saphyr = "=0.0.27"
 toml = "=1.1.2"
-toml_edit = "=0.22.27"
+toml_edit = "=0.25.12"
 thiserror = "=2.0.18"
