@@ -1,0 +1,30 @@
+name: PR Lint
+
+on:
+  pull_request:
+    branches: [ "master", "main" ]
+
+permissions:
+  contents: read
+  statuses: write
+
+jobs:
+  super-lint:
+    name: Lint Code Base
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          # Full git history is needed to get a proper list of changed files
+          fetch-depth: 0
+
+      - name: Lint Code Base
+        uses: super-linter/super-linter@v7
+        env:
+          VALIDATE_ALL_CODEBASE: false
+          DEFAULT_BRANCH: main
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Rust 관련 린트는 별도의 rust-lint.yml에서 관리하므로 Super-Linter 내에서는 제외합니다.
+          VALIDATE_RUST_2021: false
+          VALIDATE_CLIPPY: false
