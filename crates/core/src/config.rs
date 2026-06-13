@@ -40,8 +40,8 @@ impl CliseConfig {
         if let Some(parent) = config_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let content = serde_json::to_string_pretty(&self.schema_mappings)
-            .map_err(std::io::Error::other)?;
+        let content =
+            serde_json::to_string_pretty(&self.schema_mappings).map_err(std::io::Error::other)?;
         std::fs::write(config_path, content)
     }
 

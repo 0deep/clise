@@ -528,7 +528,11 @@ impl EditorState {
                     }
                 }
                 Value::Object(map) => {
-                    if map.keys().position(|k| k == child_key).is_some_and(|idx| idx > 0) {
+                    if map
+                        .keys()
+                        .position(|k| k == child_key)
+                        .is_some_and(|idx| idx > 0)
+                    {
                         can_move = true;
                     }
                 }
@@ -586,12 +590,19 @@ impl EditorState {
         if let Some(parent) = self.data.pointer(&parent_pointer) {
             match parent {
                 Value::Array(arr) => {
-                    if child_key.parse::<usize>().is_ok_and(|idx| idx + 1 < arr.len()) {
+                    if child_key
+                        .parse::<usize>()
+                        .is_ok_and(|idx| idx + 1 < arr.len())
+                    {
                         can_move = true;
                     }
                 }
                 Value::Object(map) => {
-                    if map.keys().position(|k| k == child_key).is_some_and(|idx| idx + 1 < map.len()) {
+                    if map
+                        .keys()
+                        .position(|k| k == child_key)
+                        .is_some_and(|idx| idx + 1 < map.len())
+                    {
                         can_move = true;
                     }
                 }
@@ -1337,41 +1348,43 @@ impl EditorState {
                                 return Action::Noop;
                             }
                             // Transition from TextPrompt to RenameKeyPrompt when buffer is empty
-                            if let Some(node) = self.selected_node().cloned().filter(|n| !n.path.is_empty()) {
-                                    let mut parent_path = node.path.clone();
-                                    let original_key = parent_path.pop().unwrap();
+                            if let Some(node) =
+                                self.selected_node().cloned().filter(|n| !n.path.is_empty())
+                            {
+                                let mut parent_path = node.path.clone();
+                                let original_key = parent_path.pop().unwrap();
 
-                                    // Check if parent is an object
-                                    let is_parent_object = if parent_path.is_empty() {
-                                        self.data.is_object()
-                                    } else {
-                                        self.data
-                                            .pointer(&crate::state::to_json_pointer(&parent_path))
-                                            .map(|v| v.is_object())
-                                            .unwrap_or(false)
-                                    };
+                                // Check if parent is an object
+                                let is_parent_object = if parent_path.is_empty() {
+                                    self.data.is_object()
+                                } else {
+                                    self.data
+                                        .pointer(&crate::state::to_json_pointer(&parent_path))
+                                        .map(|v| v.is_object())
+                                        .unwrap_or(false)
+                                };
 
-                                    if is_parent_object {
-                                        let current_value = self
-                                            .data
-                                            .pointer(&crate::state::to_json_pointer(&node.path))
-                                            .cloned()
-                                            .unwrap_or(serde_json::Value::Null);
+                                if is_parent_object {
+                                    let current_value = self
+                                        .data
+                                        .pointer(&crate::state::to_json_pointer(&node.path))
+                                        .cloned()
+                                        .unwrap_or(serde_json::Value::Null);
 
-                                        let mut new_buffer = original_key.clone();
-                                        if !new_buffer.is_empty() {
-                                            new_buffer.pop();
-                                        }
-                                        let new_cursor_pos = new_buffer.chars().count();
-
-                                        self.edit_mode = EditMode::RenameKeyPrompt {
-                                            parent_path,
-                                            original_key,
-                                            buffer: new_buffer,
-                                            cursor_pos: new_cursor_pos,
-                                            value: current_value,
-                                        };
+                                    let mut new_buffer = original_key.clone();
+                                    if !new_buffer.is_empty() {
+                                        new_buffer.pop();
                                     }
+                                    let new_cursor_pos = new_buffer.chars().count();
+
+                                    self.edit_mode = EditMode::RenameKeyPrompt {
+                                        parent_path,
+                                        original_key,
+                                        buffer: new_buffer,
+                                        cursor_pos: new_cursor_pos,
+                                        value: current_value,
+                                    };
+                                }
                             }
                         }
                     }

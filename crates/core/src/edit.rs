@@ -44,7 +44,11 @@ fn start_edit_impl(state: &mut EditorState, clear_value: bool) {
     }
 
     // Check schema for enum
-    if let Some(sub_schema) = state.schema.as_ref().and_then(|s| find_sub_schema(s, &path)) {
+    if let Some(sub_schema) = state
+        .schema
+        .as_ref()
+        .and_then(|s| find_sub_schema(s, &path))
+    {
         if let Some(enum_values) = sub_schema.get("enum").and_then(|v| v.as_array()) {
             let options: Vec<String> = enum_values
                 .iter()
