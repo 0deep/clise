@@ -1,5 +1,7 @@
+use crate::state::{
+    CompletionItem, CompletionKind, EditMode, EditorState, NodeType, to_json_pointer,
+};
 use serde_json::Value;
-use crate::state::{EditorState, EditMode, NodeType, CompletionItem, CompletionKind, to_json_pointer};
 
 pub fn start_edit(state: &mut EditorState) {
     start_edit_impl(state, false);
@@ -27,7 +29,7 @@ fn start_edit_impl(state: &mut EditorState, clear_value: bool) {
 
     let pointer = to_json_pointer(&path);
     let current_value = state.data.pointer(&pointer).unwrap_or(&Value::Null);
-    
+
     // Special handling for Boolean
     let is_bool = current_value.as_bool();
     if let Some(b) = is_bool {
@@ -51,9 +53,12 @@ fn start_edit_impl(state: &mut EditorState, clear_value: bool) {
                     .iter()
                     .map(|v| v.as_str().unwrap_or(&v.to_string()).to_string())
                     .collect();
-                
-                let selected = options.iter()
-                    .position(|opt| opt == &current_value.as_str().unwrap_or(&current_value.to_string()))
+
+                let selected = options
+                    .iter()
+                    .position(|opt| {
+                        opt == &current_value.as_str().unwrap_or(&current_value.to_string())
+                    })
                     .unwrap_or(0);
 
                 state.edit_mode = EditMode::Dropdown { options, selected };
@@ -92,7 +97,9 @@ fn start_edit_impl(state: &mut EditorState, clear_value: bool) {
                 let is_parent_object = if parent_path.is_empty() {
                     state.data.is_object()
                 } else {
-                    state.data.pointer(&parent_pointer)
+                    state
+                        .data
+                        .pointer(&parent_pointer)
                         .map(|v| v.is_object())
                         .unwrap_or(false)
                 };
@@ -122,9 +129,13 @@ pub fn find_sub_schema<'a>(schema: &'a Value, path: &[String]) -> Option<&'a Val
     find_sub_schema_recursive(schema, schema, path)
 }
 
-fn find_sub_schema_recursive<'a>(root: &'a Value, current: &'a Value, path: &[String]) -> Option<&'a Value> {
+fn find_sub_schema_recursive<'a>(
+    root: &'a Value,
+    current: &'a Value,
+    path: &[String],
+) -> Option<&'a Value> {
     let mut current = current;
-    
+
     // Resolve $ref if present
     while let Some(ref_path) = current.get("$ref").and_then(|v| v.as_str()) {
         if ref_path.starts_with("#/") {
@@ -171,7 +182,7 @@ fn find_sub_schema_recursive<'a>(root: &'a Value, current: &'a Value, path: &[St
     if let Some(items) = current.get("items") {
         // Any segment in an array path (index) maps to items schema
         if segment.parse::<usize>().is_ok() || segment == "*" {
-             return find_sub_schema_recursive(root, items, tail);
+            return find_sub_schema_recursive(root, items, tail);
         }
     }
 
@@ -248,7 +259,10 @@ pub fn get_completions_for_path(state: &EditorState, path: &[String]) -> Vec<Com
                     label: key.clone(),
                     value: prop_schema.get("default").cloned().unwrap_or(Value::Null),
                     kind: CompletionKind::Property,
-                    detail: prop_schema.get("description").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                    detail: prop_schema
+                        .get("description")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
                 });
             }
         }
@@ -266,9 +280,12 @@ pub fn apply_completion(state: &mut EditorState, path: &[String], item: &Complet
     state.rebuild_flattened();
 }
 
-pub fn resolve_schema_type_and_default(root: &Value, current: &Value) -> (Option<Value>, Option<String>) {
+pub fn resolve_schema_type_and_default(
+    root: &Value,
+    current: &Value,
+) -> (Option<Value>, Option<String>) {
     let mut current = current;
-    
+
     // Resolve $ref if present
     while let Some(ref_path) = current.get("$ref").and_then(|v| v.as_str()) {
         if ref_path.starts_with("#/") {
@@ -351,13 +368,18 @@ fn get_default_value_from_schema(schema: &Value, path: &[String]) -> Value {
 
 pub fn apply_edit(state: &mut EditorState) {
     match &state.edit_mode {
-        EditMode::NewKeyDropdown { parent_path, temp_key, options, selected } => {
+        EditMode::NewKeyDropdown {
+            parent_path,
+            temp_key,
+            options,
+            selected,
+        } => {
             // save_to_undo has already been called in trigger_add_child
             let key = options[*selected].clone();
             let parent_path = parent_path.clone();
             let temp_key = temp_key.clone();
             state.edit_mode = EditMode::Normal;
-            
+
             let parent_pointer = to_json_pointer(&parent_path);
             let val = if let Some(schema) = &state.schema {
                 let mut child_path = parent_path.clone();
@@ -380,18 +402,27 @@ pub fn apply_edit(state: &mut EditorState) {
             // Move cursor to the newly changed key node
             let mut target_path = parent_path;
             target_path.push(key);
-            if let Some(pos) = state.flattened_nodes.iter().position(|n| n.path == target_path) {
+            if let Some(pos) = state
+                .flattened_nodes
+                .iter()
+                .position(|n| n.path == target_path)
+            {
                 state.selected = pos;
                 start_edit(state);
             }
             return;
         }
-        EditMode::NewKeyPrompt { parent_path, temp_key, buffer, .. } => {
+        EditMode::NewKeyPrompt {
+            parent_path,
+            temp_key,
+            buffer,
+            ..
+        } => {
             let key = buffer.trim().to_string();
             let parent_path = parent_path.clone();
             let temp_key = temp_key.clone();
             state.edit_mode = EditMode::Normal;
-            
+
             let parent_pointer = to_json_pointer(&parent_path);
             if key.is_empty() {
                 if let Some(parent) = state.data.pointer_mut(&parent_pointer) {
@@ -400,7 +431,11 @@ pub fn apply_edit(state: &mut EditorState) {
                     }
                 }
                 state.rebuild_flattened();
-                if let Some(pos) = state.flattened_nodes.iter().position(|n| n.path == parent_path) {
+                if let Some(pos) = state
+                    .flattened_nodes
+                    .iter()
+                    .position(|n| n.path == parent_path)
+                {
                     state.selected = pos;
                 }
             } else {
@@ -424,23 +459,33 @@ pub fn apply_edit(state: &mut EditorState) {
                 // Move cursor to the newly changed key node
                 let mut target_path = parent_path;
                 target_path.push(key);
-                if let Some(pos) = state.flattened_nodes.iter().position(|n| n.path == target_path) {
+                if let Some(pos) = state
+                    .flattened_nodes
+                    .iter()
+                    .position(|n| n.path == target_path)
+                {
                     state.selected = pos;
                     start_edit(state);
                 }
             }
             return;
         }
-        EditMode::RenameKeyPrompt { parent_path, original_key, buffer, value, .. } => {
+        EditMode::RenameKeyPrompt {
+            parent_path,
+            original_key,
+            buffer,
+            value,
+            ..
+        } => {
             let new_key = buffer.trim().to_string();
             let parent_path = parent_path.clone();
             let original_key = original_key.clone();
             let preserved_value = value.clone();
             state.edit_mode = EditMode::Normal;
-            
+
             state.save_to_undo();
             let parent_pointer = to_json_pointer(&parent_path);
-            
+
             if new_key.is_empty() {
                 // Delete the key-value pair
                 if let Some(parent) = state.data.pointer_mut(&parent_pointer) {
@@ -450,7 +495,11 @@ pub fn apply_edit(state: &mut EditorState) {
                 }
                 state.rebuild_flattened();
                 // Select the parent or adjust selection
-                if let Some(pos) = state.flattened_nodes.iter().position(|n| n.path == parent_path) {
+                if let Some(pos) = state
+                    .flattened_nodes
+                    .iter()
+                    .position(|n| n.path == parent_path)
+                {
                     state.selected = pos;
                 }
             } else if new_key != original_key {
@@ -475,10 +524,10 @@ pub fn apply_edit(state: &mut EditorState) {
                 // Update paths in all_nodes_cache
                 let mut old_prefix = parent_path.clone();
                 old_prefix.push(original_key.clone());
-                
+
                 let mut new_prefix = parent_path.clone();
                 new_prefix.push(new_key.clone());
-                
+
                 for node in &mut state.all_nodes_cache {
                     if node.path.starts_with(&old_prefix) {
                         let suffix = node.path[old_prefix.len()..].to_vec();
@@ -489,7 +538,7 @@ pub fn apply_edit(state: &mut EditorState) {
                 }
 
                 state.rebuild_flattened();
-                
+
                 // Track key rename in state.renamed_keys
                 let parent_pointer = to_json_pointer(&parent_path);
                 let new_key_path = if parent_pointer.is_empty() {
@@ -502,13 +551,20 @@ pub fn apply_edit(state: &mut EditorState) {
                 } else {
                     format!("{}/{}", parent_pointer, original_key)
                 };
-                let true_original_key = state.renamed_keys.remove(&orig_key_path).unwrap_or_else(|| original_key.clone());
+                let true_original_key = state
+                    .renamed_keys
+                    .remove(&orig_key_path)
+                    .unwrap_or_else(|| original_key.clone());
                 state.renamed_keys.insert(new_key_path, true_original_key);
 
                 // Move cursor to the renamed key
                 let mut target_path = parent_path;
                 target_path.push(new_key);
-                if let Some(pos) = state.flattened_nodes.iter().position(|n| n.path == target_path) {
+                if let Some(pos) = state
+                    .flattened_nodes
+                    .iter()
+                    .position(|n| n.path == target_path)
+                {
                     state.selected = pos;
                 }
             }
@@ -531,15 +587,16 @@ pub fn apply_edit(state: &mut EditorState) {
 
     let new_value = match &state.edit_mode {
         EditMode::TextPrompt { buffer, .. } => {
-                        let trimmed = buffer.trim();
+            let trimmed = buffer.trim();
             let schema_type = if let Some(schema) = &state.schema {
                 find_sub_schema(schema, &path).and_then(|s| s.get("type").and_then(|v| v.as_str()))
             } else {
                 None
             };
 
-            let has_quotes = (trimmed.starts_with('"') && trimmed.ends_with('"') && trimmed.len() >= 2)
-                || (trimmed.starts_with('\'') && trimmed.ends_with('\'') && trimmed.len() >= 2);
+            let has_quotes =
+                (trimmed.starts_with('"') && trimmed.ends_with('"') && trimmed.len() >= 2)
+                    || (trimmed.starts_with('\'') && trimmed.ends_with('\'') && trimmed.len() >= 2);
 
             let is_string_target = schema_type == Some("string");
 
@@ -566,7 +623,10 @@ pub fn apply_edit(state: &mut EditorState) {
                         } else if let Ok(n) = buffer.parse::<u64>() {
                             Value::Number(serde_json::Number::from(n))
                         } else if let Ok(n) = buffer.parse::<f64>() {
-                            Value::Number(serde_json::Number::from_f64(n).unwrap_or_else(|| serde_json::Number::from(0)))
+                            Value::Number(
+                                serde_json::Number::from_f64(n)
+                                    .unwrap_or_else(|| serde_json::Number::from(0)),
+                            )
                         } else if buffer == "true" {
                             Value::Bool(true)
                         } else if buffer == "false" {
@@ -583,7 +643,10 @@ pub fn apply_edit(state: &mut EditorState) {
                         } else if let Ok(n) = buffer.parse::<u64>() {
                             Value::Number(serde_json::Number::from(n))
                         } else if let Ok(n) = buffer.parse::<f64>() {
-                            Value::Number(serde_json::Number::from_f64(n).unwrap_or_else(|| serde_json::Number::from(0)))
+                            Value::Number(
+                                serde_json::Number::from_f64(n)
+                                    .unwrap_or_else(|| serde_json::Number::from(0)),
+                            )
                         } else {
                             Value::String(buffer.clone())
                         }
@@ -606,7 +669,10 @@ pub fn apply_edit(state: &mut EditorState) {
                         } else if let Ok(n) = buffer.parse::<u64>() {
                             Value::Number(serde_json::Number::from(n))
                         } else if let Ok(n) = buffer.parse::<f64>() {
-                            Value::Number(serde_json::Number::from_f64(n).unwrap_or_else(|| serde_json::Number::from(0)))
+                            Value::Number(
+                                serde_json::Number::from_f64(n)
+                                    .unwrap_or_else(|| serde_json::Number::from(0)),
+                            )
                         } else if buffer == "true" {
                             Value::Bool(true)
                         } else if buffer == "false" {
@@ -646,7 +712,16 @@ pub fn apply_edit(state: &mut EditorState) {
 
 pub fn cancel_edit(state: &mut EditorState) {
     match &state.edit_mode {
-        EditMode::NewKeyDropdown { parent_path, temp_key, .. } | EditMode::NewKeyPrompt { parent_path, temp_key, .. } => {
+        EditMode::NewKeyDropdown {
+            parent_path,
+            temp_key,
+            ..
+        }
+        | EditMode::NewKeyPrompt {
+            parent_path,
+            temp_key,
+            ..
+        } => {
             let parent_path = parent_path.clone();
             let temp_key = temp_key.clone();
             state.edit_mode = EditMode::Normal;
@@ -660,7 +735,11 @@ pub fn cancel_edit(state: &mut EditorState) {
             state.rebuild_flattened();
 
             // Move cursor back to the original parent node
-            if let Some(pos) = state.flattened_nodes.iter().position(|n| n.path == parent_path) {
+            if let Some(pos) = state
+                .flattened_nodes
+                .iter()
+                .position(|n| n.path == parent_path)
+            {
                 state.selected = pos;
             }
 
@@ -688,11 +767,12 @@ pub fn get_addable_keys(state: &EditorState, path: &[String]) -> Vec<String> {
         if let Some(props) = sub_schema.get("properties").and_then(|v| v.as_object()) {
             // Get current keys at this path
             let pointer = to_json_pointer(path);
-            let current_keys: std::collections::HashSet<String> = if let Some(Value::Object(map)) = state.data.pointer(&pointer) {
-                map.keys().cloned().collect()
-            } else {
-                std::collections::HashSet::new()
-            };
+            let current_keys: std::collections::HashSet<String> =
+                if let Some(Value::Object(map)) = state.data.pointer(&pointer) {
+                    map.keys().cloned().collect()
+                } else {
+                    std::collections::HashSet::new()
+                };
 
             for (key, _) in props {
                 if !current_keys.contains(key) {
@@ -730,7 +810,7 @@ pub fn trigger_add_child(state: &mut EditorState) {
         }
         NodeType::Object { .. } => {
             let addable = get_addable_keys(state, &path);
-            
+
             // Generate a unique temporary key (avoiding duplicates)
             let mut temp_key = "new_key".to_string();
             let parent_pointer = to_json_pointer(&path);
@@ -746,19 +826,23 @@ pub fn trigger_add_child(state: &mut EditorState) {
             if let Some(parent_node) = state.flattened_nodes.iter_mut().find(|n| n.path == path) {
                 parent_node.expanded = true;
             }
-            
+
             if let Some(parent) = state.data.pointer_mut(&parent_pointer) {
                 if let Value::Object(map) = parent {
                     map.insert(temp_key.clone(), Value::Null);
                 }
             }
-            
+
             state.rebuild_flattened();
 
             // Force move the cursor to the newly created temporary node
             let mut temp_path = path.clone();
             temp_path.push(temp_key.clone());
-            if let Some(pos) = state.flattened_nodes.iter().position(|n| n.path == temp_path) {
+            if let Some(pos) = state
+                .flattened_nodes
+                .iter()
+                .position(|n| n.path == temp_path)
+            {
                 state.selected = pos;
             }
 
@@ -785,17 +869,17 @@ pub fn trigger_add_child(state: &mut EditorState) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
     use crate::format::Format;
+    use serde_json::json;
 
     #[test]
     fn test_edit_boolean_toggle() {
         let data = json!({"active": true});
         let mut state = EditorState::new(data, Format::Json, None, None);
-        
+
         state.selected = 1; // "active"
         start_edit(&mut state);
-        
+
         assert_eq!(state.data["active"], false);
         assert_eq!(state.edit_mode, EditMode::Normal);
     }
@@ -804,21 +888,21 @@ mod tests {
     fn test_edit_text_prompt() {
         let data = json!({"name": "old"});
         let mut state = EditorState::new(data, Format::Json, None, None);
-        
+
         state.selected = 1; // "name"
         start_edit(&mut state);
-        
+
         match &state.edit_mode {
             EditMode::TextPrompt { buffer, .. } => assert_eq!(buffer, "old"),
             _ => panic!("Expected TextPrompt"),
         }
-        
+
         if let EditMode::TextPrompt { buffer, .. } = &mut state.edit_mode {
             *buffer = "new".to_string();
         }
-        
+
         apply_edit(&mut state);
-        
+
         assert_eq!(state.data["name"], "new");
         assert_eq!(state.edit_mode, EditMode::Normal);
     }
@@ -827,10 +911,10 @@ mod tests {
     fn test_start_edit_cleared() {
         let data = json!({"name": "old", "active": true});
         let mut state = EditorState::new(data, Format::Json, None, None);
-        
+
         state.selected = 1; // "name"
         start_edit_cleared(&mut state);
-        
+
         match &state.edit_mode {
             EditMode::TextPrompt { buffer, .. } => assert_eq!(buffer, ""),
             _ => panic!("Expected TextPrompt with empty buffer"),
@@ -850,23 +934,26 @@ mod tests {
     fn test_string_remains_string_even_if_numeric() {
         let data = json!({"version": "1.0"});
         let mut state = EditorState::new(data, Format::Json, None, None);
-        
+
         state.selected = 1; // "version"
         start_edit(&mut state);
-        
+
         if let EditMode::TextPrompt { buffer, .. } = &state.edit_mode {
             assert_eq!(buffer, "\"1.0\"");
         } else {
             panic!("Expected TextPrompt");
         }
-        
+
         if let EditMode::TextPrompt { buffer, .. } = &mut state.edit_mode {
             *buffer = "\"2.0\"".to_string();
         }
-        
+
         apply_edit(&mut state);
-        
-        assert!(state.data["version"].is_string(), "Should remain a string if quoted");
+
+        assert!(
+            state.data["version"].is_string(),
+            "Should remain a string if quoted"
+        );
         assert_eq!(state.data["version"], "2.0");
 
         start_edit(&mut state);
@@ -874,7 +961,10 @@ mod tests {
             *buffer = "3.0".to_string();
         }
         apply_edit(&mut state);
-        assert!(state.data["version"].is_number(), "Should convert to number if unquoted");
+        assert!(
+            state.data["version"].is_number(),
+            "Should convert to number if unquoted"
+        );
         assert_eq!(state.data["version"], json!(3.0));
     }
 
@@ -882,16 +972,16 @@ mod tests {
     fn test_number_remains_number_if_valid() {
         let data = json!({"count": 10});
         let mut state = EditorState::new(data, Format::Json, None, None);
-        
+
         state.selected = 1; // "count"
         start_edit(&mut state);
-        
+
         if let EditMode::TextPrompt { buffer, .. } = &mut state.edit_mode {
             *buffer = "20".to_string();
         }
-        
+
         apply_edit(&mut state);
-        
+
         assert!(state.data["count"].is_number(), "Should remain a number");
         assert_eq!(state.data["count"], 20);
     }
@@ -913,7 +1003,10 @@ mod tests {
         let path = vec!["name".to_string()];
         let sub = find_sub_schema(&schema, &path);
         assert!(sub.is_some());
-        assert_eq!(sub.unwrap().get("type").and_then(|v| v.as_str()), Some("string"));
+        assert_eq!(
+            sub.unwrap().get("type").and_then(|v| v.as_str()),
+            Some("string")
+        );
     }
 
     #[test]
@@ -925,7 +1018,10 @@ mod tests {
         let path = vec!["0".to_string()];
         let sub = find_sub_schema(&schema, &path);
         assert!(sub.is_some());
-        assert_eq!(sub.unwrap().get("type").and_then(|v| v.as_str()), Some("integer"));
+        assert_eq!(
+            sub.unwrap().get("type").and_then(|v| v.as_str()),
+            Some("integer")
+        );
     }
 
     #[test]
@@ -942,7 +1038,10 @@ mod tests {
         let path = vec!["a".to_string(), "b".to_string()];
         let sub = find_sub_schema(&schema, &path);
         assert!(sub.is_some());
-        assert_eq!(sub.unwrap().get("type").and_then(|v| v.as_str()), Some("boolean"));
+        assert_eq!(
+            sub.unwrap().get("type").and_then(|v| v.as_str()),
+            Some("boolean")
+        );
     }
 
     #[test]
@@ -950,13 +1049,13 @@ mod tests {
         let data = serde_json::json!({ "level": "info" });
         let mut state = EditorState::new(data, crate::format::Format::Json, None, None);
         state.selected = 1; // "level" node
-        state.edit_mode = EditMode::Dropdown { 
+        state.edit_mode = EditMode::Dropdown {
             options: vec!["debug".to_string(), "info".to_string(), "warn".to_string()],
-            selected: 2 // "warn"
+            selected: 2, // "warn"
         };
-        
+
         apply_edit(&mut state);
-        
+
         assert_eq!(state.data["level"], "warn");
         assert_eq!(state.edit_mode, EditMode::Normal);
     }
@@ -981,12 +1080,15 @@ mod tests {
                 }
             }
         });
-        
+
         // Test resolving through anyOf and $ref
         let path = vec!["user".to_string(), "city".to_string()];
         let sub = find_sub_schema(&schema, &path);
         assert!(sub.is_some());
-        assert_eq!(sub.unwrap().get("type").and_then(|v| v.as_str()), Some("string"));
+        assert_eq!(
+            sub.unwrap().get("type").and_then(|v| v.as_str()),
+            Some("string")
+        );
     }
 
     #[test]
@@ -998,9 +1100,14 @@ mod tests {
                 }
             }
         });
-        let mut state = EditorState::new(serde_json::json!({}), crate::format::Format::Json, None, None);
+        let mut state = EditorState::new(
+            serde_json::json!({}),
+            crate::format::Format::Json,
+            None,
+            None,
+        );
         state.schema = Some(schema);
-        
+
         let completions = state.get_completions_for_path(&["level".to_string()]);
         assert_eq!(completions.len(), 3);
         assert_eq!(completions[0].label, "info");
@@ -1019,10 +1126,13 @@ mod tests {
         let mut state = EditorState::new(data, crate::format::Format::Json, None, None);
         state.schema = Some(schema);
         state.selected = 1; // "version"
-        
-        state.edit_mode = EditMode::TextPrompt { buffer: "1.0".to_string(), cursor_pos: 3 };
+
+        state.edit_mode = EditMode::TextPrompt {
+            buffer: "1.0".to_string(),
+            cursor_pos: 3,
+        };
         apply_edit(&mut state);
-        
+
         // Should be string because schema says so, even if "1.0" looks like a number
         assert!(state.data["version"].is_string());
         assert_eq!(state.data["version"], "1.0");
@@ -1041,7 +1151,7 @@ mod tests {
         let data = serde_json::json!({ "a": "existing" });
         let mut state = EditorState::new(data, crate::format::Format::Json, None, None);
         state.schema = Some(schema);
-        
+
         let addable = get_addable_keys(&state, &[]);
         assert_eq!(addable, vec!["b", "c"]);
     }
@@ -1102,16 +1212,30 @@ mod tests {
 
         // Edit "a" (null) to "[]"
         state.selected = 1; // "a"
-        state.edit_mode = EditMode::TextPrompt { buffer: "[]".to_string(), cursor_pos: 2 };
+        state.edit_mode = EditMode::TextPrompt {
+            buffer: "[]".to_string(),
+            cursor_pos: 2,
+        };
         apply_edit(&mut state);
-        assert!(state.data["a"].is_array(), "Should be array but was {:?}", state.data["a"]);
+        assert!(
+            state.data["a"].is_array(),
+            "Should be array but was {:?}",
+            state.data["a"]
+        );
         assert_eq!(state.data["a"], json!([]));
 
         // Edit "b" (string) to "{}"
         state.selected = 2; // "b"
-        state.edit_mode = EditMode::TextPrompt { buffer: "{}".to_string(), cursor_pos: 2 };
+        state.edit_mode = EditMode::TextPrompt {
+            buffer: "{}".to_string(),
+            cursor_pos: 2,
+        };
         apply_edit(&mut state);
-        assert!(state.data["b"].is_object(), "Should be object but was {:?}", state.data["b"]);
+        assert!(
+            state.data["b"].is_object(),
+            "Should be object but was {:?}",
+            state.data["b"]
+        );
         assert_eq!(state.data["b"], json!({}));
     }
 
@@ -1123,14 +1247,20 @@ mod tests {
 
         // Edit "a" ("true" string) to "\"false\"" -> stays string "false"
         state.selected = 1; // "a"
-        state.edit_mode = EditMode::TextPrompt { buffer: "\"false\"".to_string(), cursor_pos: 7 };
+        state.edit_mode = EditMode::TextPrompt {
+            buffer: "\"false\"".to_string(),
+            cursor_pos: 7,
+        };
         apply_edit(&mut state);
         assert!(state.data["a"].is_string());
         assert_eq!(state.data["a"], json!("false"));
 
         // Edit "b" to "\"true\"" -> stays string "true"
         state.selected = 2; // "b"
-        state.edit_mode = EditMode::TextPrompt { buffer: "\"true\"".to_string(), cursor_pos: 6 };
+        state.edit_mode = EditMode::TextPrompt {
+            buffer: "\"true\"".to_string(),
+            cursor_pos: 6,
+        };
         apply_edit(&mut state);
         assert!(state.data["b"].is_string());
         assert_eq!(state.data["b"], json!("true"));
@@ -1138,7 +1268,10 @@ mod tests {
         // Edit "a" (now string "false") to "true" (unquoted) -> becomes boolean true
         state.selected = 1;
         start_edit(&mut state);
-        state.edit_mode = EditMode::TextPrompt { buffer: "true".to_string(), cursor_pos: 4 };
+        state.edit_mode = EditMode::TextPrompt {
+            buffer: "true".to_string(),
+            cursor_pos: 4,
+        };
         apply_edit(&mut state);
         assert!(state.data["a"].is_boolean());
         assert_eq!(state.data["a"], json!(true));
@@ -1152,10 +1285,12 @@ mod tests {
 
         // Edit boolean "a" (true) to explicit string ""false""
         state.selected = 1; // "a"
-        state.edit_mode = EditMode::TextPrompt { buffer: "\"false\"".to_string(), cursor_pos: 7 };
+        state.edit_mode = EditMode::TextPrompt {
+            buffer: "\"false\"".to_string(),
+            cursor_pos: 7,
+        };
         apply_edit(&mut state);
         assert!(state.data["a"].is_string());
         assert_eq!(state.data["a"], json!("false"));
     }
-
-    }
+}

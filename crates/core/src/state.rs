@@ -1,6 +1,6 @@
-use serde_json::Value;
-use serde::{Serialize, Deserialize};
 use crate::format::Format;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 /// Types of tree nodes
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,15 +56,34 @@ pub enum EditMode {
     /// Normal navigation mode
     Normal,
     /// Enum dropdown popup
-    Dropdown { options: Vec<String>, selected: usize },
+    Dropdown {
+        options: Vec<String>,
+        selected: usize,
+    },
     /// Text input prompt
     TextPrompt { buffer: String, cursor_pos: usize },
     /// Dropdown for adding a new key (includes parent node path and temporary key)
-    NewKeyDropdown { parent_path: Vec<String>, temp_key: String, options: Vec<String>, selected: usize },
+    NewKeyDropdown {
+        parent_path: Vec<String>,
+        temp_key: String,
+        options: Vec<String>,
+        selected: usize,
+    },
     /// Text input for adding a new key (includes parent node path and temporary key)
-    NewKeyPrompt { parent_path: Vec<String>, temp_key: String, buffer: String, cursor_pos: usize },
+    NewKeyPrompt {
+        parent_path: Vec<String>,
+        temp_key: String,
+        buffer: String,
+        cursor_pos: usize,
+    },
     /// Rename existing key prompt (parent path, original key name, buffer, cursor position, current value)
-    RenameKeyPrompt { parent_path: Vec<String>, original_key: String, buffer: String, cursor_pos: usize, value: serde_json::Value },
+    RenameKeyPrompt {
+        parent_path: Vec<String>,
+        original_key: String,
+        buffer: String,
+        cursor_pos: usize,
+        value: serde_json::Value,
+    },
     /// Prompt to confirm saving changes
     SavePrompt { selected: usize },
     /// Search input prompt
@@ -183,7 +202,12 @@ pub struct EditorState {
 }
 
 impl EditorState {
-    pub fn new(data: Value, format: Format, filename: Option<String>, original_text: Option<String>) -> Self {
+    pub fn new(
+        data: Value,
+        format: Format,
+        filename: Option<String>,
+        original_text: Option<String>,
+    ) -> Self {
         let mut state = Self {
             data: data.clone(),
             original_data: data,
@@ -224,7 +248,10 @@ impl EditorState {
     /// Positive delta = scroll down, negative = scroll up.
     pub fn scroll_viewport(&mut self, delta: isize) {
         self.scroll_to_selected = false;
-        let max_scroll = self.flattened_nodes.len().saturating_sub(self.viewport_height);
+        let max_scroll = self
+            .flattened_nodes
+            .len()
+            .saturating_sub(self.viewport_height);
         if delta > 0 {
             self.scroll_offset = (self.scroll_offset + delta as usize).min(max_scroll);
         } else {
@@ -242,7 +269,9 @@ impl EditorState {
                 return Some(idx);
             }
             current_y += lines;
-            if current_y > self.viewport_height { break; }
+            if current_y > self.viewport_height {
+                break;
+            }
             idx += 1;
         }
         None
@@ -265,9 +294,7 @@ impl EditorState {
                 let orig_keys: Vec<_> = orig_map.keys().collect();
                 curr_keys != orig_keys
             }
-            (Value::Array(curr_arr), Value::Array(orig_arr)) => {
-                curr_arr.len() != orig_arr.len()
-            }
+            (Value::Array(curr_arr), Value::Array(orig_arr)) => curr_arr.len() != orig_arr.len(),
             (curr, orig) => curr != orig,
         }
     }
@@ -394,7 +421,7 @@ impl EditorState {
 
         self.all_nodes_cache.retain(|n| !n.path.starts_with(path));
         self.rebuild_flattened();
-        
+
         // Adjust selected if it's now out of bounds
         if self.selected >= self.flattened_nodes.len() {
             self.selected = self.flattened_nodes.len().saturating_sub(1);
@@ -403,11 +430,16 @@ impl EditorState {
         Ok(())
     }
 
-    pub fn add_child_node(&mut self, parent_path: &[String], key: Option<String>, value: Value) -> Result<(), String> {
+    pub fn add_child_node(
+        &mut self,
+        parent_path: &[String],
+        key: Option<String>,
+        value: Value,
+    ) -> Result<(), String> {
         self.save_to_undo();
         let parent_pointer = to_json_pointer(parent_path);
         let mut child_path = parent_path.to_vec();
-        
+
         if let Some(parent) = self.data.pointer_mut(&parent_pointer) {
             if parent.is_null() {
                 let mut initialized = false;
@@ -450,14 +482,22 @@ impl EditorState {
         }
 
         // Set the parent node's expanded state to true
-        if let Some(parent_node) = self.flattened_nodes.iter_mut().find(|n| n.path == parent_path) {
+        if let Some(parent_node) = self
+            .flattened_nodes
+            .iter_mut()
+            .find(|n| n.path == parent_path)
+        {
             parent_node.expanded = true;
         }
 
         self.rebuild_flattened();
 
         // Move the cursor to the newly added child node
-        if let Some(pos) = self.flattened_nodes.iter().position(|n| n.path == child_path) {
+        if let Some(pos) = self
+            .flattened_nodes
+            .iter()
+            .position(|n| n.path == child_path)
+        {
             self.selected = pos;
         }
 
@@ -514,7 +554,8 @@ impl EditorState {
                     new_path[node.path.len() - 1] = (idx - 1).to_string();
                 }
                 Value::Object(map) => {
-                    let mut items: Vec<(String, serde_json::Value)> = std::mem::take(map).into_iter().collect();
+                    let mut items: Vec<(String, serde_json::Value)> =
+                        std::mem::take(map).into_iter().collect();
                     let idx = items.iter().position(|(k, _)| k == child_key).unwrap();
                     items.swap(idx, idx - 1);
                     *map = items.into_iter().collect();
@@ -580,7 +621,8 @@ impl EditorState {
                     new_path[node.path.len() - 1] = (idx + 1).to_string();
                 }
                 Value::Object(map) => {
-                    let mut items: Vec<(String, serde_json::Value)> = std::mem::take(map).into_iter().collect();
+                    let mut items: Vec<(String, serde_json::Value)> =
+                        std::mem::take(map).into_iter().collect();
                     let idx = items.iter().position(|(k, _)| k == child_key).unwrap();
                     items.swap(idx, idx + 1);
                     *map = items.into_iter().collect();
@@ -605,13 +647,22 @@ impl EditorState {
 
         let query_lower = query.to_lowercase();
         let mut all_nodes = Vec::new();
-        self.collect_search_nodes(&self.data.clone(), Vec::new(), "root".to_string(), &mut all_nodes);
+        self.collect_search_nodes(
+            &self.data.clone(),
+            Vec::new(),
+            "root".to_string(),
+            &mut all_nodes,
+        );
 
         // Find matches
-        let matches: Vec<_> = all_nodes.iter().enumerate().filter(|(_, node)| {
-            node.key.to_lowercase().contains(&query_lower) || 
-            node.value.to_lowercase().contains(&query_lower)
-        }).collect();
+        let matches: Vec<_> = all_nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, node)| {
+                node.key.to_lowercase().contains(&query_lower)
+                    || node.value.to_lowercase().contains(&query_lower)
+            })
+            .collect();
 
         if matches.is_empty() {
             self.search_total_matches = 0;
@@ -621,10 +672,17 @@ impl EditorState {
         }
 
         // Find first match after current selected path
-        let current_path = self.selected_node().map(|n| n.path.clone()).unwrap_or_default();
-        let current_all_idx = all_nodes.iter().position(|n| n.path == current_path).unwrap_or(0);
+        let current_path = self
+            .selected_node()
+            .map(|n| n.path.clone())
+            .unwrap_or_default();
+        let current_all_idx = all_nodes
+            .iter()
+            .position(|n| n.path == current_path)
+            .unwrap_or(0);
 
-        let target_match = matches.iter()
+        let target_match = matches
+            .iter()
             .find(|(idx, _)| *idx > current_all_idx)
             .or_else(|| matches.first())
             .map(|(_, node)| node);
@@ -656,10 +714,16 @@ impl EditorState {
             self.rebuild_flattened();
 
             // Find new index
-            if let Some(pos) = self.flattened_nodes.iter().position(|n| n.path == target.path) {
+            if let Some(pos) = self
+                .flattened_nodes
+                .iter()
+                .position(|n| n.path == target.path)
+            {
                 self.selected = pos;
                 // Center viewport if needed
-                if self.selected < self.scroll_offset || self.selected >= self.scroll_offset + self.viewport_height {
+                if self.selected < self.scroll_offset
+                    || self.selected >= self.scroll_offset + self.viewport_height
+                {
                     self.scroll_offset = self.selected.saturating_sub(self.viewport_height / 2);
                 }
             }
@@ -678,22 +742,37 @@ impl EditorState {
 
         let query_lower = query.to_lowercase();
         let mut all_nodes = Vec::new();
-        self.collect_search_nodes(&self.data.clone(), Vec::new(), "root".to_string(), &mut all_nodes);
+        self.collect_search_nodes(
+            &self.data.clone(),
+            Vec::new(),
+            "root".to_string(),
+            &mut all_nodes,
+        );
 
-        let matches: Vec<_> = all_nodes.iter().enumerate().filter(|(_, node)| {
-            node.key.to_lowercase().contains(&query_lower) || 
-            node.value.to_lowercase().contains(&query_lower)
-        }).collect();
+        let matches: Vec<_> = all_nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, node)| {
+                node.key.to_lowercase().contains(&query_lower)
+                    || node.value.to_lowercase().contains(&query_lower)
+            })
+            .collect();
 
         self.search_total_matches = matches.len();
-        
+
         if matches.is_empty() {
             self.search_current_match_index = 0;
             return;
         }
 
-        let current_path = self.selected_node().map(|n| n.path.clone()).unwrap_or_default();
-        if let Some(pos) = matches.iter().position(|(_, node)| node.path == current_path) {
+        let current_path = self
+            .selected_node()
+            .map(|n| n.path.clone())
+            .unwrap_or_default();
+        if let Some(pos) = matches
+            .iter()
+            .position(|(_, node)| node.path == current_path)
+        {
             self.search_current_match_index = pos + 1;
         } else {
             self.search_current_match_index = 0;
@@ -722,13 +801,22 @@ impl EditorState {
         }
 
         let mut all_nodes = Vec::new();
-        self.collect_search_nodes(&self.data.clone(), Vec::new(), "root".to_string(), &mut all_nodes);
+        self.collect_search_nodes(
+            &self.data.clone(),
+            Vec::new(),
+            "root".to_string(),
+            &mut all_nodes,
+        );
 
         // Find matches
-        let matches: Vec<_> = all_nodes.iter().enumerate().filter(|(_, node)| {
-            node.key.to_lowercase().contains(&query_lower) || 
-            node.value.to_lowercase().contains(&query_lower)
-        }).collect();
+        let matches: Vec<_> = all_nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, node)| {
+                node.key.to_lowercase().contains(&query_lower)
+                    || node.value.to_lowercase().contains(&query_lower)
+            })
+            .collect();
 
         if matches.is_empty() {
             self.update_search_match_stats(query);
@@ -764,10 +852,16 @@ impl EditorState {
         self.rebuild_flattened();
 
         // Find new index
-        if let Some(pos) = self.flattened_nodes.iter().position(|n| n.path == target.path) {
+        if let Some(pos) = self
+            .flattened_nodes
+            .iter()
+            .position(|n| n.path == target.path)
+        {
             self.selected = pos;
             // Center viewport if needed
-            if self.selected < self.scroll_offset || self.selected >= self.scroll_offset + self.viewport_height {
+            if self.selected < self.scroll_offset
+                || self.selected >= self.scroll_offset + self.viewport_height
+            {
                 self.scroll_offset = self.selected.saturating_sub(self.viewport_height / 2);
             }
         }
@@ -775,7 +869,13 @@ impl EditorState {
         self.update_search_match_stats(query);
     }
 
-    fn collect_search_nodes(&self, value: &Value, path: Vec<String>, key: String, nodes: &mut Vec<SearchNode>) {
+    fn collect_search_nodes(
+        &self,
+        value: &Value,
+        path: Vec<String>,
+        key: String,
+        nodes: &mut Vec<SearchNode>,
+    ) {
         let value_display = match value {
             Value::Null => "null".to_string(),
             Value::Bool(b) => b.to_string(),
@@ -838,7 +938,9 @@ impl EditorState {
 
     /// Automatically determine node expansions from the top level based on screen height (limit: height * 2)
     pub fn auto_adjust_expansion(&mut self, height: usize) {
-        if height == 0 { return; }
+        if height == 0 {
+            return;
+        }
         let limit = height * 2;
 
         // 1. Calculate the number of nodes per level
@@ -864,10 +966,21 @@ impl EditorState {
         }
 
         let mut dummy_prev_nodes = Vec::new();
-        self.collect_expansion_paths(&self.data, Vec::new(), 0, max_expand_depth, &mut dummy_prev_nodes);
+        self.collect_expansion_paths(
+            &self.data,
+            Vec::new(),
+            0,
+            max_expand_depth,
+            &mut dummy_prev_nodes,
+        );
 
         // 4. Rebuild the flattened view based on the dummy node list
-        self.flattened_nodes = crate::flatten::rebuild_flattened(&self.data, &dummy_prev_nodes, self.show_child_counts, self.schema.as_ref());
+        self.flattened_nodes = crate::flatten::rebuild_flattened(
+            &self.data,
+            &dummy_prev_nodes,
+            self.show_child_counts,
+            self.schema.as_ref(),
+        );
     }
 
     fn collect_expansion_paths(
@@ -882,7 +995,10 @@ impl EditorState {
             return;
         }
 
-        let is_container = matches!(value, serde_json::Value::Object(_) | serde_json::Value::Array(_));
+        let is_container = matches!(
+            value,
+            serde_json::Value::Object(_) | serde_json::Value::Array(_)
+        );
         if !is_container {
             return;
         }
@@ -893,7 +1009,7 @@ impl EditorState {
             key: String::new(),
             value_display: String::new(),
             value_type: ValueType::Null, // Dummy
-            node_type: NodeType::Leaf, // Dummy
+            node_type: NodeType::Leaf,   // Dummy
             expanded: true,
         });
 
@@ -933,9 +1049,12 @@ impl EditorState {
         action
     }
 
-    fn handle_key_event_inner(&mut self, event: crossterm::event::KeyEvent) -> crate::action::Action {
-        use crossterm::event::{KeyCode, KeyModifiers};
+    fn handle_key_event_inner(
+        &mut self,
+        event: crossterm::event::KeyEvent,
+    ) -> crate::action::Action {
         use crate::action::Action;
+        use crossterm::event::{KeyCode, KeyModifiers};
 
         // Global keys: Ctrl+C should always quit
         if event.code == KeyCode::Char('c') && event.modifiers.contains(KeyModifiers::CONTROL) {
@@ -944,7 +1063,14 @@ impl EditorState {
 
         // Reset blink timer on relevant keys
         match event.code {
-            KeyCode::Left | KeyCode::Right | KeyCode::Char(_) | KeyCode::Backspace | KeyCode::Delete | KeyCode::Up | KeyCode::Down | KeyCode::Enter => {
+            KeyCode::Left
+            | KeyCode::Right
+            | KeyCode::Char(_)
+            | KeyCode::Backspace
+            | KeyCode::Delete
+            | KeyCode::Up
+            | KeyCode::Down
+            | KeyCode::Enter => {
                 self.last_cursor_activity = std::time::Instant::now();
             }
             _ => {}
@@ -967,7 +1093,10 @@ impl EditorState {
         match &mut self.edit_mode {
             EditMode::Normal => {
                 // Handle 's' for saving
-                if event.code == KeyCode::Char('s') && !event.modifiers.contains(KeyModifiers::CONTROL) && !event.modifiers.contains(KeyModifiers::ALT) {
+                if event.code == KeyCode::Char('s')
+                    && !event.modifiers.contains(KeyModifiers::CONTROL)
+                    && !event.modifiers.contains(KeyModifiers::ALT)
+                {
                     return Action::Save {
                         data: self.data.clone(),
                         format: self.format,
@@ -975,32 +1104,47 @@ impl EditorState {
                 }
 
                 // Handle 'u' for Undo
-                if event.code == KeyCode::Char('u') && !event.modifiers.contains(KeyModifiers::CONTROL) && !event.modifiers.contains(KeyModifiers::ALT) {
+                if event.code == KeyCode::Char('u')
+                    && !event.modifiers.contains(KeyModifiers::CONTROL)
+                    && !event.modifiers.contains(KeyModifiers::ALT)
+                {
                     self.undo();
                     return Action::Noop;
                 }
 
                 // Handle 'r' for Redo
-                if event.code == KeyCode::Char('r') && !event.modifiers.contains(KeyModifiers::CONTROL) && !event.modifiers.contains(KeyModifiers::ALT) {
+                if event.code == KeyCode::Char('r')
+                    && !event.modifiers.contains(KeyModifiers::CONTROL)
+                    && !event.modifiers.contains(KeyModifiers::ALT)
+                {
                     self.redo();
                     return Action::Noop;
                 }
 
                 // Handle T for toggling type hints
-                if event.code == KeyCode::Char('t') && !event.modifiers.contains(KeyModifiers::CONTROL) && !event.modifiers.contains(KeyModifiers::ALT) {
+                if event.code == KeyCode::Char('t')
+                    && !event.modifiers.contains(KeyModifiers::CONTROL)
+                    && !event.modifiers.contains(KeyModifiers::ALT)
+                {
                     self.show_type_hints = !self.show_type_hints;
                     return Action::Noop;
                 }
 
                 // Handle K for toggling child counts
-                if event.code == KeyCode::Char('k') && !event.modifiers.contains(KeyModifiers::CONTROL) && !event.modifiers.contains(KeyModifiers::ALT) {
+                if event.code == KeyCode::Char('k')
+                    && !event.modifiers.contains(KeyModifiers::CONTROL)
+                    && !event.modifiers.contains(KeyModifiers::ALT)
+                {
                     self.show_child_counts = !self.show_child_counts;
                     self.rebuild_flattened();
                     return Action::Noop;
                 }
 
                 // Handle '/' for search
-                if event.code == KeyCode::Char('/') && !event.modifiers.contains(KeyModifiers::CONTROL) && !event.modifiers.contains(KeyModifiers::ALT) {
+                if event.code == KeyCode::Char('/')
+                    && !event.modifiers.contains(KeyModifiers::CONTROL)
+                    && !event.modifiers.contains(KeyModifiers::ALT)
+                {
                     self.edit_mode = EditMode::SearchPrompt {
                         buffer: String::new(),
                         cursor_pos: 0,
@@ -1052,14 +1196,19 @@ impl EditorState {
                     KeyCode::Backspace => {
                         crate::edit::start_edit_cleared(self);
                     }
-                    KeyCode::Esc | KeyCode::Char('q') if event.code == KeyCode::Esc || (!event.modifiers.contains(KeyModifiers::CONTROL) && !event.modifiers.contains(KeyModifiers::ALT)) => {
+                    KeyCode::Esc | KeyCode::Char('q')
+                        if event.code == KeyCode::Esc
+                            || (!event.modifiers.contains(KeyModifiers::CONTROL)
+                                && !event.modifiers.contains(KeyModifiers::ALT)) =>
+                    {
                         if self.search_query.is_some() {
                             self.search_query = None;
                             self.search_total_matches = 0;
                             self.search_current_match_index = 0;
                             return Action::Noop;
                         }
-                        let is_actually_dirty = self.is_dirty && (self.data != self.original_data || self.key_order_changed);
+                        let is_actually_dirty = self.is_dirty
+                            && (self.data != self.original_data || self.key_order_changed);
                         if is_actually_dirty {
                             self.edit_mode = EditMode::SavePrompt { selected: 0 };
                             return Action::Noop;
@@ -1067,7 +1216,11 @@ impl EditorState {
                             return Action::Quit;
                         }
                     }
-                    KeyCode::Delete | KeyCode::Char('d') if event.code == KeyCode::Delete || (!event.modifiers.contains(KeyModifiers::CONTROL) && !event.modifiers.contains(KeyModifiers::ALT)) => {
+                    KeyCode::Delete | KeyCode::Char('d')
+                        if event.code == KeyCode::Delete
+                            || (!event.modifiers.contains(KeyModifiers::CONTROL)
+                                && !event.modifiers.contains(KeyModifiers::ALT)) =>
+                    {
                         if let Some(node) = self.selected_node() {
                             let path = node.path.clone();
                             let _ = self.delete_node(&path);
@@ -1139,38 +1292,42 @@ impl EditorState {
                 }
                 return Action::Noop;
             }
-            EditMode::SavePrompt { selected } => {
-                match event.code {
-                    KeyCode::Left | KeyCode::Right => {
-                        *selected = 1 - *selected;
-                    }
-                    KeyCode::Enter => {
-                        if *selected == 0 {
-                            return Action::Quit;
-                        } else {
-                            return Action::SaveAndQuit {
-                                data: self.data.clone(),
-                                format: self.format,
-                            };
-                        }
-                    }
-                    KeyCode::Char('y') | KeyCode::Char('Y') => {
+            EditMode::SavePrompt { selected } => match event.code {
+                KeyCode::Left | KeyCode::Right => {
+                    *selected = 1 - *selected;
+                }
+                KeyCode::Enter => {
+                    if *selected == 0 {
+                        return Action::Quit;
+                    } else {
                         return Action::SaveAndQuit {
                             data: self.data.clone(),
                             format: self.format,
                         };
                     }
-                    KeyCode::Char('n') | KeyCode::Char('N') => {
-                        return Action::Quit;
-                    }
-                    KeyCode::Char('c') | KeyCode::Char('C') | KeyCode::Esc => {
-                        self.edit_mode = EditMode::Normal;
-                        return Action::Noop;
-                    }
-                    _ => {}
                 }
+                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    return Action::SaveAndQuit {
+                        data: self.data.clone(),
+                        format: self.format,
+                    };
+                }
+                KeyCode::Char('n') | KeyCode::Char('N') => {
+                    return Action::Quit;
+                }
+                KeyCode::Char('c') | KeyCode::Char('C') | KeyCode::Esc => {
+                    self.edit_mode = EditMode::Normal;
+                    return Action::Noop;
+                }
+                _ => {}
+            },
+            EditMode::TextPrompt { buffer, cursor_pos }
+            | EditMode::NewKeyPrompt {
+                buffer, cursor_pos, ..
             }
-            EditMode::TextPrompt { buffer, cursor_pos } | EditMode::NewKeyPrompt { buffer, cursor_pos, .. } | EditMode::RenameKeyPrompt { buffer, cursor_pos, .. } => {
+            | EditMode::RenameKeyPrompt {
+                buffer, cursor_pos, ..
+            } => {
                 match event.code {
                     KeyCode::Enter => crate::edit::apply_edit(self),
                     KeyCode::Esc => crate::edit::cancel_edit(self),
@@ -1193,18 +1350,21 @@ impl EditorState {
                                 if node.path.len() > 0 {
                                     let mut parent_path = node.path.clone();
                                     let original_key = parent_path.pop().unwrap();
-                                    
+
                                     // Check if parent is an object
                                     let is_parent_object = if parent_path.is_empty() {
                                         self.data.is_object()
                                     } else {
-                                        self.data.pointer(&crate::state::to_json_pointer(&parent_path))
+                                        self.data
+                                            .pointer(&crate::state::to_json_pointer(&parent_path))
                                             .map(|v| v.is_object())
                                             .unwrap_or(false)
                                     };
 
                                     if is_parent_object {
-                                        let current_value = self.data.pointer(&crate::state::to_json_pointer(&node.path))
+                                        let current_value = self
+                                            .data
+                                            .pointer(&crate::state::to_json_pointer(&node.path))
                                             .cloned()
                                             .unwrap_or(serde_json::Value::Null);
 
@@ -1239,23 +1399,24 @@ impl EditorState {
                     _ => {}
                 }
             }
-            EditMode::Dropdown { options, selected } | EditMode::NewKeyDropdown { options, selected, .. } => {
-                match event.code {
-                    KeyCode::Enter => crate::edit::apply_edit(self),
-                    KeyCode::Esc => crate::edit::cancel_edit(self),
-                    KeyCode::Up => {
-                        if *selected > 0 {
-                            *selected -= 1;
-                        }
+            EditMode::Dropdown { options, selected }
+            | EditMode::NewKeyDropdown {
+                options, selected, ..
+            } => match event.code {
+                KeyCode::Enter => crate::edit::apply_edit(self),
+                KeyCode::Esc => crate::edit::cancel_edit(self),
+                KeyCode::Up => {
+                    if *selected > 0 {
+                        *selected -= 1;
                     }
-                    KeyCode::Down => {
-                        if *selected + 1 < options.len() {
-                            *selected += 1;
-                        }
-                    }
-                    _ => {}
                 }
-            }
+                KeyCode::Down => {
+                    if *selected + 1 < options.len() {
+                        *selected += 1;
+                    }
+                }
+                _ => {}
+            },
         }
         Action::Noop
     }
@@ -1273,7 +1434,12 @@ pub(crate) fn to_json_pointer(path: &[String]) -> String {
     s
 }
 
-pub(crate) fn find_changed_paths(v1: &Value, v2: &Value, current_path: Vec<String>, changed: &mut Vec<Vec<String>>) {
+pub(crate) fn find_changed_paths(
+    v1: &Value,
+    v2: &Value,
+    current_path: Vec<String>,
+    changed: &mut Vec<Vec<String>>,
+) {
     if v1 != v2 {
         changed.push(current_path.clone());
         match (v1, v2) {
@@ -1307,9 +1473,9 @@ pub(crate) fn find_changed_paths(v1: &Value, v2: &Value, current_path: Vec<Strin
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
     use crate::format::Format;
-    use crossterm::event::{KeyEvent, KeyCode, KeyModifiers};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use serde_json::json;
 
     #[test]
     fn test_auto_adjust_expansion() {
@@ -1321,13 +1487,13 @@ mod tests {
             }
         });
         let mut state = EditorState::new(data, Format::Json, None, None);
-        
+
         // Initial state: root expanded, nested collapsed
         assert_eq!(state.flattened_nodes.len(), 2);
-        
+
         state.auto_adjust_expansion(1);
         assert_eq!(state.flattened_nodes.len(), 2);
-        
+
         state.auto_adjust_expansion(2);
         assert_eq!(state.flattened_nodes.len(), 4);
     }
@@ -1337,15 +1503,15 @@ mod tests {
         let data = json!({});
         let mut state = EditorState::new(data, Format::Json, None, None);
         assert!(!state.show_type_hints);
-        
-        use crossterm::event::{KeyEvent, KeyCode, KeyModifiers, KeyEventKind, KeyEventState};
+
+        use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
         let event = KeyEvent {
             code: KeyCode::Char('t'),
             modifiers: KeyModifiers::NONE,
             kind: KeyEventKind::Press,
             state: KeyEventState::empty(),
         };
-        
+
         state.handle_key_event(event);
         assert!(state.show_type_hints);
     }
@@ -1355,15 +1521,15 @@ mod tests {
         let data = json!({"a": 1, "b": 2});
         let mut state = EditorState::new(data, Format::Json, None, None);
         state.selected = 0;
-        
-        use crossterm::event::{KeyEvent, KeyCode, KeyModifiers, KeyEventKind, KeyEventState};
+
+        use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
         let event = KeyEvent {
             code: KeyCode::Down,
             modifiers: KeyModifiers::NONE,
             kind: KeyEventKind::Press,
             state: KeyEventState::empty(),
         };
-        
+
         state.handle_key_event(event);
         assert_eq!(state.selected, 1);
     }
@@ -1373,15 +1539,15 @@ mod tests {
         let data = json!({"a": 1, "b": 2});
         let mut state = EditorState::new(data, Format::Json, None, None);
         state.selected = 1; // "a"
-        
-        use crossterm::event::{KeyEvent, KeyCode, KeyModifiers, KeyEventKind, KeyEventState};
+
+        use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
         let event = KeyEvent {
             code: KeyCode::Delete,
             modifiers: KeyModifiers::NONE,
             kind: KeyEventKind::Press,
             state: KeyEventState::empty(),
         };
-        
+
         state.handle_key_event(event);
         assert_eq!(state.data, json!({"b": 2}));
     }
@@ -1391,19 +1557,19 @@ mod tests {
         let data = json!({});
         let mut state = EditorState::new(data, Format::Json, None, None);
         state.selected = 0; // root
-        
-        use crossterm::event::{KeyEvent, KeyCode, KeyModifiers, KeyEventKind, KeyEventState};
+
+        use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
         let event = KeyEvent {
             code: KeyCode::Enter,
             modifiers: KeyModifiers::NONE,
             kind: KeyEventKind::Press,
             state: KeyEventState::empty(),
         };
-        
+
         state.handle_key_event(event);
         // Should enter NewKeyPrompt since there is no schema
         match state.edit_mode {
-            EditMode::NewKeyPrompt { .. } => {},
+            EditMode::NewKeyPrompt { .. } => {}
             _ => panic!("Expected NewKeyPrompt"),
         }
     }
@@ -1412,8 +1578,10 @@ mod tests {
     fn test_add_child_to_object() {
         let data = json!({});
         let mut state = EditorState::new(data, Format::Json, None, None);
-        state.add_child_node(&[], Some("new_key".to_string()), json!("value")).unwrap();
-        
+        state
+            .add_child_node(&[], Some("new_key".to_string()), json!("value"))
+            .unwrap();
+
         assert_eq!(state.data["new_key"], "value");
         // Root + 1 child
         assert_eq!(state.flattened_nodes.len(), 2);
@@ -1425,7 +1593,7 @@ mod tests {
         let mut state = EditorState::new(data, Format::Json, None, None);
         state.add_child_node(&[], None, json!(1)).unwrap();
         state.add_child_node(&[], None, json!(2)).unwrap();
-        
+
         assert_eq!(state.data, json!([1, 2]));
     }
 
@@ -1434,7 +1602,7 @@ mod tests {
         let data = json!({"a": 1, "b": 2});
         let mut state = EditorState::new(data, Format::Json, None, None);
         state.delete_node(&["a".to_string()]).unwrap();
-        
+
         assert_eq!(state.data, json!({"b": 2}));
         assert_eq!(state.flattened_nodes.len(), 2); // root + "b"
     }
@@ -1444,7 +1612,7 @@ mod tests {
         let data = json!([1, 2, 3]);
         let mut state = EditorState::new(data, Format::Json, None, None);
         state.delete_node(&["1".to_string()]).unwrap(); // delete '2'
-        
+
         assert_eq!(state.data, json!([1, 3]));
         // Check flattened paths
         assert_eq!(state.flattened_nodes[1].path, vec!["0".to_string()]);
@@ -1456,7 +1624,7 @@ mod tests {
         let data = json!({"a": 1});
         let mut state = EditorState::new(data, Format::Json, None, None);
         state.selected = 1; // "a"
-        
+
         state.delete_node(&["a".to_string()]).unwrap();
         assert_eq!(state.selected, 0); // Back to root
     }
@@ -1465,19 +1633,19 @@ mod tests {
     fn test_undo_redo_basic() {
         let data = json!({"a": 1});
         let mut state = EditorState::new(data, Format::Json, None, None);
-        
+
         // 1. Save initial state
         state.save_to_undo();
-        
+
         // 2. Modify data
         state.data = json!({"a": 2});
         state.selected = 10;
-        
+
         // 3. Perform Undo
         state.undo();
         assert_eq!(state.data, json!({"a": 1}));
         assert_eq!(state.selected, 0);
-        
+
         // 4. Perform Redo
         state.redo();
         assert_eq!(state.data, json!({"a": 2}));
@@ -1487,15 +1655,15 @@ mod tests {
     #[test]
     fn test_undo_redo_delete() {
         let mut state = EditorState::new(json!({"a": 1, "b": 2}), Format::Json, None, None);
-        
+
         // 1. Delete "a" (save_to_undo is called internally in delete_node)
         state.delete_node(&["a".to_string()]).unwrap();
         assert_eq!(state.data, json!({"b": 2}));
-        
+
         // 2. Perform Undo
         state.undo();
         assert_eq!(state.data, json!({"a": 1, "b": 2}));
-        
+
         // 3. Perform Redo
         state.redo();
         assert_eq!(state.data, json!({"b": 2}));
@@ -1505,11 +1673,11 @@ mod tests {
     fn test_undo_cancel_add_child() {
         let mut state = EditorState::new(json!({}), Format::Json, None, None);
         state.selected = 0; // Root
-        
+
         // 1. Execute trigger_add_child (creates temp node and calls save_to_undo)
         crate::edit::trigger_add_child(&mut state);
         assert!(state.undo_stack.len() > 0);
-        
+
         // 2. Execute cancel_edit (removes temp node and calls pop_undo)
         crate::edit::cancel_edit(&mut state);
         assert_eq!(state.undo_stack.len(), 0);
@@ -1541,7 +1709,10 @@ mod tests {
 
         // 2. Undo -> stack becomes empty, should be not dirty
         state.undo();
-        assert!(!state.is_dirty, "Should not be dirty after undoing all changes");
+        assert!(
+            !state.is_dirty,
+            "Should not be dirty after undoing all changes"
+        );
 
         // 3. Redo -> change reapplied, should be dirty again
         state.redo();
@@ -1550,10 +1721,10 @@ mod tests {
 
     #[test]
     fn test_save_prompt_keys() {
-        use crossterm::event::{KeyEvent, KeyCode, KeyModifiers};
         use crate::action::Action;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let mut state = EditorState::new(json!({"a": 1}), Format::Json, None, None);
-        
+
         // 1. Not dirty -> Esc should Quit
         let event = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
         let action = state.handle_key_event(event);
@@ -1565,7 +1736,10 @@ mod tests {
         let event = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
         let action = state.handle_key_event(event);
         assert!(matches!(action, Action::Noop));
-        assert!(matches!(state.edit_mode, EditMode::SavePrompt { selected: 0 }));
+        assert!(matches!(
+            state.edit_mode,
+            EditMode::SavePrompt { selected: 0 }
+        ));
 
         // 3. SavePrompt mode: 'c' should back to Normal
         let event = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE);
@@ -1589,11 +1763,17 @@ mod tests {
         state.edit_mode = EditMode::SavePrompt { selected: 0 };
         let event = KeyEvent::new(KeyCode::Right, KeyModifiers::NONE);
         state.handle_key_event(event);
-        assert!(matches!(state.edit_mode, EditMode::SavePrompt { selected: 1 }));
+        assert!(matches!(
+            state.edit_mode,
+            EditMode::SavePrompt { selected: 1 }
+        ));
 
         let event = KeyEvent::new(KeyCode::Left, KeyModifiers::NONE);
         state.handle_key_event(event);
-        assert!(matches!(state.edit_mode, EditMode::SavePrompt { selected: 0 }));
+        assert!(matches!(
+            state.edit_mode,
+            EditMode::SavePrompt { selected: 0 }
+        ));
 
         // 7. Enter on No (selected: 0)
         let event = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
@@ -1609,7 +1789,12 @@ mod tests {
 
     #[test]
     fn test_handle_key_event_help() {
-        let mut state = EditorState::new(serde_json::json!({}), crate::format::Format::Json, None, None);
+        let mut state = EditorState::new(
+            serde_json::json!({}),
+            crate::format::Format::Json,
+            None,
+            None,
+        );
         state.edit_mode = EditMode::Normal;
 
         // '?' should switch to Help mode
@@ -1627,18 +1812,18 @@ mod tests {
         let mut state = EditorState::new(data, Format::Json, None, None);
         // Default should be true
         assert!(state.show_child_counts);
-        
-        use crossterm::event::{KeyEvent, KeyCode, KeyModifiers, KeyEventKind, KeyEventState};
+
+        use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
         let event = KeyEvent {
             code: KeyCode::Char('k'),
             modifiers: KeyModifiers::NONE,
             kind: KeyEventKind::Press,
             state: KeyEventState::empty(),
         };
-        
+
         state.handle_key_event(event);
         assert!(!state.show_child_counts);
-        
+
         state.handle_key_event(event);
         assert!(state.show_child_counts);
     }
@@ -1647,7 +1832,7 @@ mod tests {
     fn test_move_node_up_down_in_array() {
         let data = json!([1, 2, 3]);
         let mut state = EditorState::new(data, Format::Json, None, None);
-        
+
         // Root is 0, [1] is 1, [2] is 2, [3] is 3
         state.selected = 2; // Select "2"
         assert_eq!(state.flattened_nodes[state.selected].value_display, "2");
@@ -1663,7 +1848,7 @@ mod tests {
         assert_eq!(state.data, json!([1, 2, 3]));
         assert_eq!(state.selected, 2);
         assert_eq!(state.flattened_nodes[state.selected].value_display, "2");
-        
+
         // Move down again: [1, 3, 2]
         state.move_node_down();
         assert_eq!(state.data, json!([1, 3, 2]));
@@ -1680,7 +1865,7 @@ mod tests {
     fn test_move_node_up_down_in_object() {
         let data = json!({"a": 1, "b": 2, "c": 3});
         let mut state = EditorState::new(data, Format::Json, None, None);
-        
+
         // Root is 0, "a" is 1, "b" is 2, "c" is 3
         state.selected = 2; // Select "b"
         assert_eq!(state.flattened_nodes[state.selected].key, "b");
@@ -1698,7 +1883,7 @@ mod tests {
         assert_eq!(keys, vec!["a", "b", "c"]);
         assert_eq!(state.selected, 2);
         assert_eq!(state.flattened_nodes[state.selected].key, "b");
-        
+
         // Move down again: {"a": 1, "c": 3, "b": 2}
         state.move_node_down();
         let keys: Vec<_> = state.data.as_object().unwrap().keys().collect::<Vec<_>>();
@@ -1715,17 +1900,17 @@ mod tests {
 
     #[test]
     fn test_handle_key_event_shortcuts() {
-        use crossterm::event::{KeyEvent, KeyCode, KeyModifiers};
         use crate::action::Action;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let data = json!({"a": 1});
         let mut state = EditorState::new(data, Format::Json, None, None);
-        
+
         // --- Save shortcut ---
         // New: 's' (No modifiers)
         let event = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE);
         let action = state.handle_key_event(event);
         assert!(matches!(action, Action::Save { .. }));
-        
+
         // Old: 'Ctrl+S' (Should not trigger Action::Save anymore)
         let event = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL);
         let action = state.handle_key_event(event);
@@ -1734,7 +1919,7 @@ mod tests {
         // --- Undo shortcut ---
         state.save_to_undo();
         assert_eq!(state.undo_stack.len(), 1);
-        
+
         // New: 'u' (No modifiers)
         let event = KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE);
         state.handle_key_event(event);
@@ -1749,14 +1934,14 @@ mod tests {
         assert_eq!(state.undo_stack.len(), 1);
 
         // --- Redo shortcut ---
-        // Setup: state has 1 undo, 1 redo (from 'u' check). 
+        // Setup: state has 1 undo, 1 redo (from 'u' check).
         // Let's clear and setup specifically.
         state.undo_stack.clear();
         state.redo_stack.clear();
         state.save_to_undo(); // stack: [1]
         state.undo(); // stack: [], redo: [1]
         assert_eq!(state.redo_stack.len(), 1);
-        
+
         // New: 'r' (No modifiers)
         let event = KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE);
         state.handle_key_event(event);
@@ -1772,7 +1957,7 @@ mod tests {
 
     #[test]
     fn test_search_action_finds_and_expands() {
-        use crossterm::event::{KeyEvent, KeyCode, KeyModifiers};
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let data = serde_json::json!({
             "a": {
                 "b": {
@@ -1781,30 +1966,30 @@ mod tests {
             }
         });
         let mut state = EditorState::new(data, crate::format::Format::Json, None, None);
-        
-        // Initial state: root is expanded, others collapsed by default? 
+
+        // Initial state: root is expanded, others collapsed by default?
         // Actually EditorState::new calls rebuild_flattened which uses dummy prev_nodes (empty)
         // Let's check initial expansion.
         assert_eq!(state.flattened_nodes.len(), 2); // root and "a"
-        
+
         // Enter search mode
         let event = KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE);
         state.handle_key_event(event);
         assert!(matches!(state.edit_mode, EditMode::SearchPrompt { .. }));
-        
+
         // Input "target"
         if let EditMode::SearchPrompt { buffer, cursor_pos } = &mut state.edit_mode {
             *buffer = "target".to_string();
             *cursor_pos = buffer.len();
         }
-        
+
         // Press Enter to search
         let event = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
         state.handle_key_event(event);
-        
+
         // Should find "target", expand parents, and select it
         assert!(matches!(state.edit_mode, EditMode::SearchPrompt { .. }));
-        
+
         // After expansion:
         // 0: root
         // 1: a
@@ -1813,7 +1998,10 @@ mod tests {
         assert_eq!(state.flattened_nodes.len(), 4);
         assert_eq!(state.selected, 3);
         assert_eq!(state.flattened_nodes[state.selected].key, "c");
-        assert_eq!(state.flattened_nodes[state.selected].value_display, "\"target\"");
+        assert_eq!(
+            state.flattened_nodes[state.selected].value_display,
+            "\"target\""
+        );
 
         // Escape to exit search mode
         state.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
@@ -1833,7 +2021,7 @@ mod tests {
         assert!(matches!(state.edit_mode, EditMode::SearchPrompt { .. }));
         assert_eq!(state.search_total_matches, 0);
         assert_eq!(state.search_current_match_index, 0);
-        
+
         // 2. Type 'k' -> matches "key1" and "key2" (total 2)
         state.handle_key_event(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
         assert_eq!(state.search_query, Some("k".to_string()));
@@ -1866,10 +2054,10 @@ mod tests {
         // 6. Enter to confirm (keeps search active, goes to next match)
         state.handle_key_event(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
         state.handle_key_event(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
-        
+
         // First match is index 1 ("key1")
         assert_eq!(state.search_current_match_index, 1);
-        
+
         // Enter -> moves to next match ("key2", index 2)
         state.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(state.search_query, Some("k".to_string()));
@@ -1901,36 +2089,40 @@ mod tests {
             }
         });
         let mut state = EditorState::new(data, crate::format::Format::Json, None, None);
-        
+
         // 1. Search for "target"
         state.handle_key_event(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
-        
+
         // Type 't'
         state.handle_key_event(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE));
-        
+
         // Check if it moved to group1.item_a (first match)
         let selected_node = state.selected_node().unwrap();
         assert!(selected_node.key.contains("t") || selected_node.value_display.contains("t"));
-        
+
         // Type 'a' -> "ta"
         state.handle_key_event(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
-        
+
         // Still should be at group1.item_a
         let selected_node = state.selected_node().unwrap();
         assert_eq!(selected_node.key, "item_a");
-        
+
         // Search for "target_key" by typing more
         // Current query "ta". Let's type "rget_k"
         for c in "rget_k".chars() {
             state.handle_key_event(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
         }
-        
+
         // Should move to group2.target_key
         let selected_node = state.selected_node().unwrap();
         assert_eq!(selected_node.key, "target_key");
-        
+
         // Check if parent (group2) is expanded
-        let group2_node = state.flattened_nodes.iter().find(|n| n.key == "group2").unwrap();
+        let group2_node = state
+            .flattened_nodes
+            .iter()
+            .find(|n| n.key == "group2")
+            .unwrap();
         assert!(group2_node.expanded);
     }
 
@@ -1946,71 +2138,94 @@ mod tests {
         state.handle_key_event(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
         state.handle_key_event(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
         assert_eq!(state.search_total_matches, 2);
-        
+
         // Press ESC in SearchPrompt
         state.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(matches!(state.edit_mode, EditMode::Normal));
-        assert_eq!(state.search_query, Some("k".to_string()), "Search query should be preserved when results exist");
+        assert_eq!(
+            state.search_query,
+            Some("k".to_string()),
+            "Search query should be preserved when results exist"
+        );
         assert_eq!(state.search_total_matches, 2);
 
         // Press ESC in Normal mode with search_query active -> Reset search
         state.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-        assert_eq!(state.search_query, None, "Search query should be cleared on second ESC");
+        assert_eq!(
+            state.search_query, None,
+            "Search query should be cleared on second ESC"
+        );
         assert_eq!(state.search_total_matches, 0);
 
         // Scenario 2: SearchPrompt with NO results + ESC -> Reset immediately
         state.handle_key_event(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
         state.handle_key_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
         assert_eq!(state.search_total_matches, 0);
-        
+
         state.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(matches!(state.edit_mode, EditMode::Normal));
-        assert_eq!(state.search_query, None, "Search query should be cleared immediately if no matches");
+        assert_eq!(
+            state.search_query, None,
+            "Search query should be cleared immediately if no matches"
+        );
 
         // Scenario 3: SearchPrompt with EMPTY buffer + ESC -> Reset immediately
         state.handle_key_event(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
         assert_eq!(state.search_total_matches, 0);
-        
+
         state.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(matches!(state.edit_mode, EditMode::Normal));
-        assert_eq!(state.search_query, None, "Search query should be cleared immediately if buffer is empty");
+        assert_eq!(
+            state.search_query, None,
+            "Search query should be cleared immediately if buffer is empty"
+        );
     }
 
     #[test]
     fn test_backspace_to_rename_key() {
         use crate::edit::apply_edit;
-        use crossterm::event::{KeyEvent, KeyCode, KeyModifiers};
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let data = serde_json::json!({"name": "val"});
         let mut state = EditorState::new(data, crate::format::Format::Json, None, None);
-        
+
         // 1. Enter edit mode on "name" value
         state.selected = 1; // "name" node
-        state.edit_mode = EditMode::TextPrompt { buffer: "val".to_string(), cursor_pos: 3 };
-        
+        state.edit_mode = EditMode::TextPrompt {
+            buffer: "val".to_string(),
+            cursor_pos: 3,
+        };
+
         // 2. Clear buffer
         if let EditMode::TextPrompt { buffer, cursor_pos } = &mut state.edit_mode {
             *buffer = "".to_string();
             *cursor_pos = 0;
         }
-        
+
         // 3. Press Backspace again -> Should transition to RenameKeyPrompt
         state.handle_key_event(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
-        
+
         match &state.edit_mode {
-            EditMode::RenameKeyPrompt { original_key, buffer, .. } => {
+            EditMode::RenameKeyPrompt {
+                original_key,
+                buffer,
+                ..
+            } => {
                 assert_eq!(original_key, "name");
                 assert_eq!(buffer, "nam"); // "name" minus last char
             }
             _ => panic!("Expected RenameKeyPrompt, got {:?}", state.edit_mode),
         }
-        
+
         // 4. Change key to "key" and apply
-        if let EditMode::RenameKeyPrompt { buffer, cursor_pos, .. } = &mut state.edit_mode {
+        if let EditMode::RenameKeyPrompt {
+            buffer, cursor_pos, ..
+        } = &mut state.edit_mode
+        {
             *buffer = "key".to_string();
             *cursor_pos = 3;
         }
         apply_edit(&mut state);
-        
+
         // 5. Verify result
         assert_eq!(state.data, serde_json::json!({"key": "val"}));
         assert_eq!(state.flattened_nodes[1].key, "key");
@@ -2019,33 +2234,41 @@ mod tests {
     #[test]
     fn test_backspace_to_rename_key_for_object() {
         use crate::edit::apply_edit;
-        use crossterm::event::{KeyEvent, KeyCode, KeyModifiers};
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let data = serde_json::json!({"settings": {"theme": "dark"}});
         let mut state = EditorState::new(data, crate::format::Format::Json, None, None);
-        
+
         // 1. Select the "settings" node (which is an Object)
         state.selected = 1; // "settings" node
         assert_eq!(state.flattened_nodes[1].key, "settings");
-        
+
         // 2. Press Backspace on the Object node directly -> Should transition to RenameKeyPrompt
         state.handle_key_event(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
-        
+
         match &state.edit_mode {
-            EditMode::RenameKeyPrompt { original_key, buffer, value, .. } => {
+            EditMode::RenameKeyPrompt {
+                original_key,
+                buffer,
+                value,
+                ..
+            } => {
                 assert_eq!(original_key, "settings");
                 assert_eq!(buffer, "setting"); // "settings" minus last char
                 assert_eq!(value, &serde_json::json!({"theme": "dark"})); // Preserves the entire object
             }
             _ => panic!("Expected RenameKeyPrompt, got {:?}", state.edit_mode),
         }
-        
+
         // 3. Change key to "config" and apply
-        if let EditMode::RenameKeyPrompt { buffer, cursor_pos, .. } = &mut state.edit_mode {
+        if let EditMode::RenameKeyPrompt {
+            buffer, cursor_pos, ..
+        } = &mut state.edit_mode
+        {
             *buffer = "config".to_string();
             *cursor_pos = 6;
         }
         apply_edit(&mut state);
-        
+
         // 4. Verify result
         assert_eq!(state.data, serde_json::json!({"config": {"theme": "dark"}}));
         assert_eq!(state.flattened_nodes[1].key, "config");
@@ -2059,34 +2282,34 @@ mod tests {
             }
         });
         let mut state = EditorState::new(data, crate::format::Format::Json, None, None);
-        
+
         // Initial state: "nested" is collapsed
         assert_eq!(state.flattened_nodes.len(), 2);
         assert!(!state.flattened_nodes[1].expanded);
-        
+
         // 1. Save undo
         state.save_to_undo();
-        
+
         // 2. Modify "nested/key"
         let key_pointer = to_json_pointer(&["nested".to_string(), "key".to_string()]);
         if let Some(val) = state.data.pointer_mut(&key_pointer) {
             *val = serde_json::json!("new_value");
         }
         state.rebuild_flattened();
-        
+
         // 3. Perform Undo
         state.undo();
-        
+
         // "nested" should be expanded now
         assert!(state.flattened_nodes[1].expanded);
         assert_eq!(state.flattened_nodes.len(), 3);
         assert_eq!(state.flattened_nodes[2].key, "key");
-        
+
         // 4. Collapse again
         state.flattened_nodes[1].expanded = false;
         state.rebuild_flattened();
         assert_eq!(state.flattened_nodes.len(), 2);
-        
+
         // 5. Perform Redo
         state.redo();
         assert!(state.flattened_nodes[1].expanded);
@@ -2095,23 +2318,31 @@ mod tests {
 
     #[test]
     fn test_backspace_safeguard() {
-        use crossterm::event::{KeyEvent, KeyCode, KeyModifiers};
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let data = serde_json::json!({"name": "val"});
         let mut state = EditorState::new(data, crate::format::Format::Json, None, None);
 
         // 1. Enter edit mode on "name" value with empty buffer
         state.selected = 1; // "name" node
-        state.edit_mode = EditMode::TextPrompt { buffer: "".to_string(), cursor_pos: 0 };
+        state.edit_mode = EditMode::TextPrompt {
+            buffer: "".to_string(),
+            cursor_pos: 0,
+        };
 
         // 2. Press Backspace (first time)
         state.handle_key_event(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
 
         // Let's refine the test:
-        state.edit_mode = EditMode::TextPrompt { buffer: "v".to_string(), cursor_pos: 1 };
+        state.edit_mode = EditMode::TextPrompt {
+            buffer: "v".to_string(),
+            cursor_pos: 1,
+        };
 
         // First backspace: "v" -> ""
         state.handle_key_event(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
-        assert!(matches!(state.edit_mode, EditMode::TextPrompt { ref buffer, .. } if buffer.is_empty()));
+        assert!(
+            matches!(state.edit_mode, EditMode::TextPrompt { ref buffer, .. } if buffer.is_empty())
+        );
 
         // Second backspace (repeat): "" -> "" (stay in TextPrompt)
         state.handle_key_event(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
@@ -2127,11 +2358,11 @@ mod tests {
 
     #[test]
     fn test_handle_key_event_q_quits_like_esc() {
-        use crossterm::event::{KeyEvent, KeyCode, KeyModifiers};
         use crate::action::Action;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let data = json!({"a": 1});
         let mut state = EditorState::new(data.clone(), Format::Json, None, None);
-        
+
         // 'q' without modifiers should return Action::Quit if not dirty
         let event = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
         let action = state.handle_key_event(event);
@@ -2146,11 +2377,11 @@ mod tests {
 
     #[test]
     fn test_handle_key_event_d_deletes_like_delete() {
-        use crossterm::event::{KeyEvent, KeyCode, KeyModifiers};
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let data = json!({"a": 1, "b": 2});
         let mut state = EditorState::new(data, Format::Json, None, None);
         state.selected = 1; // "a" (index 0 is root {})
-        
+
         // 'd' without modifiers should delete the selected node
         let event = KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE);
         state.handle_key_event(event);

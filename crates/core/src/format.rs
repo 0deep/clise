@@ -40,8 +40,19 @@ pub fn parse(input: &str, format: Format) -> Result<Value, FormatError> {
     }
 }
 
-pub fn serialize(value: &Value, format: Format, original_text: Option<&str>, key_order_changed: bool) -> Result<String, FormatError> {
-    serialize_with_renames(value, format, original_text, key_order_changed, &std::collections::HashMap::new())
+pub fn serialize(
+    value: &Value,
+    format: Format,
+    original_text: Option<&str>,
+    key_order_changed: bool,
+) -> Result<String, FormatError> {
+    serialize_with_renames(
+        value,
+        format,
+        original_text,
+        key_order_changed,
+        &std::collections::HashMap::new(),
+    )
 }
 
 pub fn serialize_with_renames(
@@ -52,14 +63,17 @@ pub fn serialize_with_renames(
     renamed_keys: &std::collections::HashMap<String, String>,
 ) -> Result<String, FormatError> {
     match format {
-        Format::Json => {
-            Ok(serde_json::to_string_pretty(value)?)
-        }
+        Format::Json => Ok(serde_json::to_string_pretty(value)?),
         Format::Jsonc => {
             if let Some(orig) = original_text {
                 let preprocessed = preprocess_jsonc(orig);
                 if serde_json::from_str::<Value>(&preprocessed).is_ok() {
-                    return Ok(merge_jsonc_preserving_comments(orig, value, key_order_changed, renamed_keys));
+                    return Ok(merge_jsonc_preserving_comments(
+                        orig,
+                        value,
+                        key_order_changed,
+                        renamed_keys,
+                    ));
                 }
             }
             Ok(serde_json::to_string_pretty(value)?)
@@ -67,7 +81,12 @@ pub fn serialize_with_renames(
         Format::Yaml => {
             if let Some(orig) = original_text {
                 if serde_saphyr::from_str::<Value>(orig).is_ok() {
-                    return Ok(merge_yaml_preserving_comments(orig, value, key_order_changed, renamed_keys));
+                    return Ok(merge_yaml_preserving_comments(
+                        orig,
+                        value,
+                        key_order_changed,
+                        renamed_keys,
+                    ));
                 }
             }
             if let Value::Object(map) = value {
@@ -101,25 +120,33 @@ fn merge_jsonc_preserving_comments(
     key_order_changed: bool,
     renamed_keys: &std::collections::HashMap<String, String>,
 ) -> String {
-    let mut blocks: std::collections::HashMap<String, std::collections::HashMap<String, Vec<String>>> = std::collections::HashMap::new();
-    let mut original_key_orders: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    let mut blocks: std::collections::HashMap<
+        String,
+        std::collections::HashMap<String, Vec<String>>,
+    > = std::collections::HashMap::new();
+    let mut original_key_orders: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
     let mut pending_comments: Vec<String> = Vec::new();
     let mut path_stack: Vec<String> = Vec::new();
-    let mut array_indices: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    
+    let mut array_indices: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+
     let lines: Vec<&str> = original_text.lines().collect();
     let mut i = 0;
-    
+
     while i < lines.len() {
         let line = lines[i];
         let trimmed = line.trim();
-        
-        if trimmed.is_empty() || trimmed.starts_with("//") || (trimmed.starts_with("/*") && trimmed.ends_with("*/")) {
+
+        if trimmed.is_empty()
+            || trimmed.starts_with("//")
+            || (trimmed.starts_with("/*") && trimmed.ends_with("*/"))
+        {
             pending_comments.push(line.to_string());
             i += 1;
             continue;
         }
-        
+
         if trimmed.starts_with("/*") && !trimmed.contains("*/") {
             pending_comments.push(line.to_string());
             i += 1;
@@ -134,7 +161,7 @@ fn merge_jsonc_preserving_comments(
             i += 1;
             continue;
         }
-        
+
         let starts_with_close = trimmed.starts_with('}') || trimmed.starts_with(']');
         if starts_with_close {
             if !path_stack.is_empty() {
@@ -147,49 +174,56 @@ fn merge_jsonc_preserving_comments(
             i += 1;
             continue;
         }
-        
+
         let comment_part = find_comment_part(trimmed);
         let no_comment_trimmed = if !comment_part.is_empty() {
             trimmed[..trimmed.len() - comment_part.len()].trim()
         } else {
             trimmed
         };
-        
+
         if no_comment_trimmed == "{" || no_comment_trimmed == "[" {
             let parent_ptr = crate::state::to_json_pointer(&path_stack);
-            let is_in_array = updated_value.pointer(&parent_ptr).map(|v| v.is_array()).unwrap_or(false);
+            let is_in_array = updated_value
+                .pointer(&parent_ptr)
+                .map(|v| v.is_array())
+                .unwrap_or(false);
             if is_in_array {
                 let idx_ref = array_indices.entry(parent_ptr.clone()).or_insert(0);
                 let idx = *idx_ref;
                 *idx_ref += 1;
                 let idx_str = idx.to_string();
-                
+
                 let key_orders = original_key_orders.entry(parent_ptr.clone()).or_default();
                 if !key_orders.contains(&idx_str) {
                     key_orders.push(idx_str.clone());
                 }
-                
-                let block_vec = blocks.entry(parent_ptr.clone()).or_default().entry(idx_str.clone()).or_default();
+
+                let block_vec = blocks
+                    .entry(parent_ptr.clone())
+                    .or_default()
+                    .entry(idx_str.clone())
+                    .or_default();
                 for comment in pending_comments.drain(..) {
                     block_vec.push(comment);
                 }
-                
+
                 let comment_part = find_comment_part(trimmed);
                 if !comment_part.is_empty() {
                     block_vec.push(format!("__inline_comment:{}", comment_part));
                 }
-                
+
                 path_stack.push(idx_str);
             }
             i += 1;
             continue;
         }
-        
+
         let mut key = String::new();
         let mut colon_pos = None;
         let mut in_str = false;
         let mut escape = false;
-        
+
         let chars: Vec<char> = trimmed.chars().collect();
         let mut char_idx = 0;
         while char_idx < chars.len() {
@@ -214,38 +248,42 @@ fn merge_jsonc_preserving_comments(
             }
             char_idx += 1;
         }
-        
+
         let parent_ptr = crate::state::to_json_pointer(&path_stack);
-        
+
         if let Some(c_pos) = colon_pos {
             let mut key = key;
             key = find_new_key_for_original_key(&parent_ptr, &key, renamed_keys);
             let value_part = trimmed[c_pos + 1..].trim();
             let comment_part = find_comment_part(value_part);
-            
+
             let key_orders = original_key_orders.entry(parent_ptr.clone()).or_default();
             if !key_orders.contains(&key) {
                 key_orders.push(key.clone());
             }
-            
-            let block_vec = blocks.entry(parent_ptr.clone()).or_default().entry(key.clone()).or_default();
+
+            let block_vec = blocks
+                .entry(parent_ptr.clone())
+                .or_default()
+                .entry(key.clone())
+                .or_default();
             for comment in pending_comments.drain(..) {
                 block_vec.push(comment);
             }
-            
+
             if !comment_part.is_empty() {
                 block_vec.push(format!("__inline_comment:{}", comment_part));
             }
-            
+
             let val_no_comment = if !comment_part.is_empty() {
                 value_part[..value_part.len() - comment_part.len()].trim()
             } else {
                 value_part
             };
-            
+
             let is_open_object = val_no_comment.starts_with('{');
             let is_open_array = val_no_comment.starts_with('[');
-            
+
             if is_open_object || is_open_array {
                 path_stack.push(key.clone());
             }
@@ -254,49 +292,64 @@ fn merge_jsonc_preserving_comments(
             let idx = *idx_ref;
             *idx_ref += 1;
             let idx_str = idx.to_string();
-            
+
             let key_orders = original_key_orders.entry(parent_ptr.clone()).or_default();
             if !key_orders.contains(&idx_str) {
                 key_orders.push(idx_str.clone());
             }
-            
-            let block_vec = blocks.entry(parent_ptr.clone()).or_default().entry(idx_str.clone()).or_default();
+
+            let block_vec = blocks
+                .entry(parent_ptr.clone())
+                .or_default()
+                .entry(idx_str.clone())
+                .or_default();
             for comment in pending_comments.drain(..) {
                 block_vec.push(comment);
             }
-            
+
             let comment_part = find_comment_part(trimmed);
             if !comment_part.is_empty() {
                 block_vec.push(format!("__inline_comment:{}", comment_part));
             }
-            
+
             let val_no_comment = if !comment_part.is_empty() {
                 trimmed[..trimmed.len() - comment_part.len()].trim()
             } else {
                 trimmed
             };
-            
+
             if val_no_comment.starts_with('{') || val_no_comment.starts_with('[') {
                 path_stack.push(idx_str.clone());
             }
         }
-        
+
         i += 1;
     }
-    
+
     if !pending_comments.is_empty() {
-        let block_vec = blocks.entry("".to_string()).or_default().entry("__trailing_comments".to_string()).or_default();
+        let block_vec = blocks
+            .entry("".to_string())
+            .or_default()
+            .entry("__trailing_comments".to_string())
+            .or_default();
         for comment in pending_comments.drain(..) {
             block_vec.push(comment);
         }
     }
-    
-    let mut result = assemble_jsonc_block("", updated_value, &blocks, &original_key_orders, key_order_changed, 0);
-    
+
+    let mut result = assemble_jsonc_block(
+        "",
+        updated_value,
+        &blocks,
+        &original_key_orders,
+        key_order_changed,
+        0,
+    );
+
     if !original_text.ends_with('\n') && result.ends_with('\n') {
         result.pop();
     }
-    
+
     result
 }
 
@@ -314,17 +367,17 @@ fn assemble_jsonc_block(
     } else {
         updated_value.pointer(parent_ptr)
     };
-    
+
     let indent_str = " ".repeat(indent);
-    
+
     if let Some(val) = current_val {
         match val {
             Value::Object(map) => {
                 s.push_str("{\n");
-                
+
                 let mut visited = std::collections::HashSet::new();
                 let mut output_keys = Vec::new();
-                
+
                 if !key_order_changed {
                     if let Some(orig_keys) = original_key_orders.get(parent_ptr) {
                         for k in orig_keys {
@@ -335,13 +388,13 @@ fn assemble_jsonc_block(
                         }
                     }
                 }
-                
+
                 for k in map.keys() {
                     if !visited.contains(k) {
                         output_keys.push(k.clone());
                     }
                 }
-                
+
                 let len = output_keys.len();
                 for (idx, k) in output_keys.iter().enumerate() {
                     let child_ptr = if parent_ptr.is_empty() {
@@ -349,10 +402,10 @@ fn assemble_jsonc_block(
                     } else {
                         format!("{}/{}", parent_ptr, k)
                     };
-                    
+
                     let child_indent = indent + 2;
                     let child_indent_str = " ".repeat(child_indent);
-                    
+
                     let mut inline_comment = String::new();
                     if let Some(block_vec) = blocks.get(parent_ptr).and_then(|m| m.get(k)) {
                         let mut first_line_indent = None;
@@ -365,7 +418,7 @@ fn assemble_jsonc_block(
                                 }
                             }
                         }
-                        
+
                         for line in block_vec {
                             if line.starts_with("__inline_comment:") {
                                 inline_comment = line["__inline_comment:".len()..].to_string();
@@ -375,7 +428,8 @@ fn assemble_jsonc_block(
                                     s.push('\n');
                                 } else {
                                     let line_indent = line.len() - trimmed.len();
-                                    let extra_spaces = if let Some(first_indent) = first_line_indent {
+                                    let extra_spaces = if let Some(first_indent) = first_line_indent
+                                    {
                                         line_indent.saturating_sub(first_indent)
                                     } else {
                                         0
@@ -387,19 +441,29 @@ fn assemble_jsonc_block(
                             }
                         }
                     }
-                    
+
                     s.push_str(&child_indent_str);
                     s.push_str(&format!("\"{}\": ", k));
-                    
-                    let is_container = map.get(k).map(|v| v.is_object() || v.is_array()).unwrap_or(false);
+
+                    let is_container = map
+                        .get(k)
+                        .map(|v| v.is_object() || v.is_array())
+                        .unwrap_or(false);
                     if is_container {
-                        let inner = assemble_jsonc_block(&child_ptr, updated_value, blocks, original_key_orders, key_order_changed, child_indent);
+                        let inner = assemble_jsonc_block(
+                            &child_ptr,
+                            updated_value,
+                            blocks,
+                            original_key_orders,
+                            key_order_changed,
+                            child_indent,
+                        );
                         s.push_str(&inner.trim_start());
                     } else {
                         let leaf_val = map.get(k).unwrap();
                         s.push_str(&serde_json::to_string(leaf_val).unwrap_or_default());
                     }
-                    
+
                     let is_last = idx == len - 1;
                     if is_last {
                         if !inline_comment.is_empty() {
@@ -415,20 +479,20 @@ fn assemble_jsonc_block(
                         s.push('\n');
                     }
                 }
-                
+
                 s.push_str(&indent_str);
                 s.push('}');
             }
             Value::Array(arr) => {
                 s.push_str("[\n");
-                
+
                 let len = arr.len();
                 for (idx, v) in arr.iter().enumerate() {
                     let child_ptr = format!("{}/{}", parent_ptr, idx);
                     let idx_str = idx.to_string();
                     let child_indent = indent + 2;
                     let child_indent_str = " ".repeat(child_indent);
-                    
+
                     let mut inline_comment = String::new();
                     if let Some(block_vec) = blocks.get(parent_ptr).and_then(|m| m.get(&idx_str)) {
                         let mut first_line_indent = None;
@@ -441,7 +505,7 @@ fn assemble_jsonc_block(
                                 }
                             }
                         }
-                        
+
                         for line in block_vec {
                             if line.starts_with("__inline_comment:") {
                                 inline_comment = line["__inline_comment:".len()..].to_string();
@@ -451,7 +515,8 @@ fn assemble_jsonc_block(
                                     s.push('\n');
                                 } else {
                                     let line_indent = line.len() - trimmed.len();
-                                    let extra_spaces = if let Some(first_indent) = first_line_indent {
+                                    let extra_spaces = if let Some(first_indent) = first_line_indent
+                                    {
                                         line_indent.saturating_sub(first_indent)
                                     } else {
                                         0
@@ -463,15 +528,22 @@ fn assemble_jsonc_block(
                             }
                         }
                     }
-                    
+
                     s.push_str(&child_indent_str);
                     if v.is_object() || v.is_array() {
-                        let inner = assemble_jsonc_block(&child_ptr, updated_value, blocks, original_key_orders, key_order_changed, child_indent);
+                        let inner = assemble_jsonc_block(
+                            &child_ptr,
+                            updated_value,
+                            blocks,
+                            original_key_orders,
+                            key_order_changed,
+                            child_indent,
+                        );
                         s.push_str(&inner.trim_start());
                     } else {
                         s.push_str(&serde_json::to_string(v).unwrap_or_default());
                     }
-                    
+
                     let is_last = idx == len - 1;
                     if is_last {
                         if !inline_comment.is_empty() {
@@ -487,7 +559,7 @@ fn assemble_jsonc_block(
                         s.push('\n');
                     }
                 }
-                
+
                 s.push_str(&indent_str);
                 s.push(']');
             }
@@ -496,7 +568,7 @@ fn assemble_jsonc_block(
             }
         }
     }
-    
+
     if parent_ptr.is_empty() {
         if let Some(block_vec) = blocks.get("").and_then(|m| m.get("__trailing_comments")) {
             for line in block_vec {
@@ -506,7 +578,7 @@ fn assemble_jsonc_block(
         }
         s.push('\n');
     }
-    
+
     s
 }
 
@@ -518,7 +590,8 @@ fn is_valid_scheme(prefix: &str) -> bool {
     if s.is_empty() {
         return false;
     }
-    let last_valid_part = s.split(|c: char| !(c.is_ascii_alphanumeric() || c == '+' || c == '-' || c == '.'))
+    let last_valid_part = s
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '+' || c == '-' || c == '.'))
         .last()
         .unwrap_or("");
     if last_valid_part.is_empty() {
@@ -533,7 +606,7 @@ fn find_comment_part(val_part: &str) -> &str {
     let mut in_sgl_quote = false;
     let mut escape = false;
     let chars: Vec<(usize, char)> = val_part.char_indices().collect();
-    
+
     let mut idx = 0;
     while idx < chars.len() {
         let (pos, c) = chars[idx];
@@ -603,29 +676,34 @@ fn merge_yaml_preserving_comments(
     key_order_changed: bool,
     renamed_keys: &std::collections::HashMap<String, String>,
 ) -> String {
-    let mut blocks: std::collections::HashMap<String, std::collections::HashMap<String, Vec<String>>> = std::collections::HashMap::new();
-    let mut original_key_orders: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    let mut blocks: std::collections::HashMap<
+        String,
+        std::collections::HashMap<String, Vec<String>>,
+    > = std::collections::HashMap::new();
+    let mut original_key_orders: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
     let mut pending_comments: Vec<String> = Vec::new();
     let mut path_stack: Vec<(usize, String)> = Vec::new();
-    let mut array_indices: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut array_indices: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
     let mut active_target: Option<(String, String)> = None;
-    let mut inline_keys: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-    
-    
+    let mut inline_keys: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+
     let lines: Vec<&str> = original_text.lines().collect();
     let mut i = 0;
-    
+
     while i < lines.len() {
         let line = lines[i];
         let trimmed = line.trim_start();
         let indent = line.len() - trimmed.len();
-        
+
         if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with("//") {
             pending_comments.push(line.to_string());
             i += 1;
             continue;
         }
-        
+
         while let Some(&(stack_indent, _)) = path_stack.last() {
             if stack_indent >= indent {
                 path_stack.pop();
@@ -633,33 +711,42 @@ fn merge_yaml_preserving_comments(
                 break;
             }
         }
-        
+
         let is_array_item = trimmed.starts_with("- ") || trimmed == "-";
-        
+
         if is_array_item {
             let parent_path: Vec<String> = path_stack.iter().map(|(_, k)| k.clone()).collect();
             let parent_ptr = crate::state::to_json_pointer(&parent_path);
-            
+
             let idx_ref = array_indices.entry(parent_ptr.clone()).or_insert(0);
             let idx = *idx_ref;
             *idx_ref += 1;
             let idx_str = idx.to_string();
-            
+
             let key_orders = original_key_orders.entry(parent_ptr.clone()).or_default();
             if !key_orders.contains(&idx_str) {
                 key_orders.push(idx_str.clone());
             }
-            
+
             let header_res = format!("{}-", &line[..indent]);
-            let block_vec = blocks.entry(parent_ptr.clone()).or_default().entry(idx_str.clone()).or_default();
+            let block_vec = blocks
+                .entry(parent_ptr.clone())
+                .or_default()
+                .entry(idx_str.clone())
+                .or_default();
             for comment in pending_comments.drain(..) {
                 block_vec.push(comment);
             }
             block_vec.push(header_res);
-            
+
             path_stack.push((indent, idx_str.clone()));
-            
-            let content_part = if trimmed.starts_with("- ") { &trimmed[2..] } else { "" }.trim();
+
+            let content_part = if trimmed.starts_with("- ") {
+                &trimmed[2..]
+            } else {
+                ""
+            }
+            .trim();
             let has_colon = content_part.find(": ").or_else(|| {
                 if content_part.ends_with(':') {
                     Some(content_part.len() - 1)
@@ -667,49 +754,74 @@ fn merge_yaml_preserving_comments(
                     None
                 }
             });
-            
+
             if let Some(c_pos) = has_colon {
-                let mut key = content_part[..c_pos].trim().trim_matches('"').trim_matches('\'').to_string();
+                let mut key = content_part[..c_pos]
+                    .trim()
+                    .trim_matches('"')
+                    .trim_matches('\'')
+                    .to_string();
                 let child_parent_ptr = format!("{}/{}", parent_ptr, idx_str);
                 key = find_new_key_for_original_key(&child_parent_ptr, &key, renamed_keys);
                 inline_keys.insert(child_parent_ptr.clone(), key.clone());
-                
-                let key_orders_2 = original_key_orders.entry(child_parent_ptr.clone()).or_default();
+
+                let key_orders_2 = original_key_orders
+                    .entry(child_parent_ptr.clone())
+                    .or_default();
                 if !key_orders_2.contains(&key) {
                     key_orders_2.push(key.clone());
                 }
-                
+
                 let mut child_path = parent_path.clone();
                 child_path.push(idx_str.clone());
                 child_path.push(key.clone());
                 let child_ptr = crate::state::to_json_pointer(&child_path);
-                
+
                 let value_part = content_part[c_pos + 1..].trim();
                 let comment_part = find_comment_part(value_part);
-                
-                let block_vec_2 = blocks.entry(child_parent_ptr.clone()).or_default().entry(key.clone()).or_default();
+
+                let block_vec_2 = blocks
+                    .entry(child_parent_ptr.clone())
+                    .or_default()
+                    .entry(key.clone())
+                    .or_default();
                 active_target = Some((child_parent_ptr.clone(), key.clone()));
-                
+
                 if let Some(target_val) = updated_value.pointer(&child_ptr) {
                     let is_flow_array = value_part.starts_with('[') && target_val.is_array();
                     let is_flow_object = value_part.starts_with('{') && target_val.is_object();
                     let is_flow_container = is_flow_array || is_flow_object;
-                    let is_container = (target_val.is_array() || target_val.is_object()) && !is_flow_container;
-                    
+                    let is_container =
+                        (target_val.is_array() || target_val.is_object()) && !is_flow_container;
+
                     let leading_space = " ".repeat(indent + 2);
-                    
+
                     if !is_container {
                         let new_val_str = if is_flow_array {
-                            let items: Vec<String> = target_val.as_array().unwrap().iter()
+                            let items: Vec<String> = target_val
+                                .as_array()
+                                .unwrap()
+                                .iter()
                                 .map(|v| serde_json::to_string(v).unwrap_or_default())
                                 .collect();
                             format!("[{}]", items.join(", "))
                         } else if is_flow_object {
-                            let items: Vec<String> = target_val.as_object().unwrap().iter()
-                                .map(|(k, v)| format!("{}: {}", k, serde_json::to_string(v).unwrap_or_default()))
+                            let items: Vec<String> = target_val
+                                .as_object()
+                                .unwrap()
+                                .iter()
+                                .map(|(k, v)| {
+                                    format!(
+                                        "{}: {}",
+                                        k,
+                                        serde_json::to_string(v).unwrap_or_default()
+                                    )
+                                })
                                 .collect();
                             format!("{{{}}}", items.join(", "))
-                        } else if target_val.is_string() && (value_part.starts_with('|') || value_part.starts_with('>')) {
+                        } else if target_val.is_string()
+                            && (value_part.starts_with('|') || value_part.starts_with('>'))
+                        {
                             let indicator = value_part.split_whitespace().next().unwrap_or("|");
                             let mut s = indicator.to_string();
                             let block_leading = " ".repeat(indent + 4);
@@ -726,14 +838,14 @@ fn merge_yaml_preserving_comments(
                         } else {
                             serialize_leaf_yaml(target_val)
                         };
-                        
+
                         let line_res = if comment_part.is_empty() {
                             format!("{}{}: {}", leading_space, key, new_val_str)
                         } else {
                             format!("{}{}: {} {}", leading_space, key, new_val_str, comment_part)
                         };
                         block_vec_2.push(line_res);
-                        
+
                         if value_part.starts_with('|') || value_part.starts_with('>') {
                             while i + 1 < lines.len() {
                                 let next_line = lines[i + 1];
@@ -764,16 +876,25 @@ fn merge_yaml_preserving_comments(
                     block_vec_2.push(format!("  {}{}", &line[..indent], content_part));
                 }
             } else {
-                let block_vec = blocks.entry(parent_ptr.clone()).or_default().entry(idx_str.clone()).or_default();
+                let block_vec = blocks
+                    .entry(parent_ptr.clone())
+                    .or_default()
+                    .entry(idx_str.clone())
+                    .or_default();
                 block_vec.pop();
-                
+
                 if let Some(Value::Array(arr)) = updated_value.pointer(&parent_ptr) {
                     if idx < arr.len() {
                         let target_val = &arr[idx];
                         let val_str = serialize_leaf_yaml(target_val);
-                        let val_part = if trimmed.starts_with("- ") { &trimmed[2..] } else { "" }.trim();
+                        let val_part = if trimmed.starts_with("- ") {
+                            &trimmed[2..]
+                        } else {
+                            ""
+                        }
+                        .trim();
                         let comment_part = find_comment_part(val_part);
-                        
+
                         let leading_space = &line[..indent];
                         let line_res = if comment_part.is_empty() {
                             format!("{}- {}", leading_space, val_str)
@@ -789,11 +910,11 @@ fn merge_yaml_preserving_comments(
                 }
                 active_target = Some((parent_ptr, idx_str));
             }
-            
+
             i += 1;
             continue;
         }
-        
+
         let colon_res = trimmed.find(": ").or_else(|| {
             if trimmed.ends_with(':') {
                 Some(trimmed.len() - 1)
@@ -801,53 +922,72 @@ fn merge_yaml_preserving_comments(
                 None
             }
         });
-        
+
         if let Some(colon_pos) = colon_res {
-            let mut key = trimmed[..colon_pos].trim().trim_matches('"').trim_matches('\'').to_string();
-            
+            let mut key = trimmed[..colon_pos]
+                .trim()
+                .trim_matches('"')
+                .trim_matches('\'')
+                .to_string();
+
             let parent_path: Vec<String> = path_stack.iter().map(|(_, k)| k.clone()).collect();
             let parent_ptr = crate::state::to_json_pointer(&parent_path);
-            
+
             key = find_new_key_for_original_key(&parent_ptr, &key, renamed_keys);
-            
+
             let key_orders = original_key_orders.entry(parent_ptr.clone()).or_default();
             if !key_orders.contains(&key) {
                 key_orders.push(key.clone());
             }
-            
+
             let mut current_path = parent_path.clone();
             current_path.push(key.clone());
             let current_ptr = crate::state::to_json_pointer(&current_path);
-            
+
             active_target = Some((parent_ptr.clone(), key.clone()));
-            let block_vec = blocks.entry(parent_ptr.clone()).or_default().entry(key.clone()).or_default();
+            let block_vec = blocks
+                .entry(parent_ptr.clone())
+                .or_default()
+                .entry(key.clone())
+                .or_default();
             for comment in pending_comments.drain(..) {
                 block_vec.push(comment);
             }
-            
+
             if let Some(target_val) = updated_value.pointer(&current_ptr) {
                 let value_part = trimmed[colon_pos + 1..].trim();
                 let comment_part = find_comment_part(value_part);
-                
+
                 let is_flow_array = value_part.starts_with('[') && target_val.is_array();
                 let is_flow_object = value_part.starts_with('{') && target_val.is_object();
                 let is_flow_container = is_flow_array || is_flow_object;
-                let is_container = (target_val.is_array() || target_val.is_object()) && !is_flow_container;
-                
+                let is_container =
+                    (target_val.is_array() || target_val.is_object()) && !is_flow_container;
+
                 let leading_space = &line[..indent];
-                
+
                 if !is_container {
                     let new_val_str = if is_flow_array {
-                        let items: Vec<String> = target_val.as_array().unwrap().iter()
+                        let items: Vec<String> = target_val
+                            .as_array()
+                            .unwrap()
+                            .iter()
                             .map(|v| serde_json::to_string(v).unwrap_or_default())
                             .collect();
                         format!("[{}]", items.join(", "))
                     } else if is_flow_object {
-                        let items: Vec<String> = target_val.as_object().unwrap().iter()
-                            .map(|(k, v)| format!("{}: {}", k, serde_json::to_string(v).unwrap_or_default()))
+                        let items: Vec<String> = target_val
+                            .as_object()
+                            .unwrap()
+                            .iter()
+                            .map(|(k, v)| {
+                                format!("{}: {}", k, serde_json::to_string(v).unwrap_or_default())
+                            })
                             .collect();
                         format!("{{{}}}", items.join(", "))
-                    } else if target_val.is_string() && (value_part.starts_with('|') || value_part.starts_with('>')) {
+                    } else if target_val.is_string()
+                        && (value_part.starts_with('|') || value_part.starts_with('>'))
+                    {
                         let indicator = value_part.split_whitespace().next().unwrap_or("|");
                         let mut s = indicator.to_string();
                         let block_leading = " ".repeat(indent + 2);
@@ -864,14 +1004,14 @@ fn merge_yaml_preserving_comments(
                     } else {
                         serialize_leaf_yaml(target_val)
                     };
-                    
+
                     let line_res = if comment_part.is_empty() {
                         format!("{}{}: {}", leading_space, key, new_val_str)
                     } else {
                         format!("{}{}: {} {}", leading_space, key, new_val_str, comment_part)
                     };
                     block_vec.push(line_res);
-                    
+
                     if value_part.starts_with('|') || value_part.starts_with('>') {
                         while i + 1 < lines.len() {
                             let next_line = lines[i + 1];
@@ -915,23 +1055,35 @@ fn merge_yaml_preserving_comments(
                 pending_comments.push(line.to_string());
             }
         }
-        
+
         i += 1;
     }
-    
+
     if !pending_comments.is_empty() {
-        let block_vec = blocks.entry("".to_string()).or_default().entry("__trailing_comments".to_string()).or_default();
+        let block_vec = blocks
+            .entry("".to_string())
+            .or_default()
+            .entry("__trailing_comments".to_string())
+            .or_default();
         for comment in pending_comments.drain(..) {
             block_vec.push(comment);
         }
     }
-    
-    let mut result = assemble_block("", updated_value, &blocks, &original_key_orders, key_order_changed, 0, &inline_keys);
-    
+
+    let mut result = assemble_block(
+        "",
+        updated_value,
+        &blocks,
+        &original_key_orders,
+        key_order_changed,
+        0,
+        &inline_keys,
+    );
+
     if !original_text.ends_with('\n') && result.ends_with('\n') {
         result.pop();
     }
-    
+
     result
 }
 
@@ -950,20 +1102,22 @@ fn assemble_block(
     } else {
         updated_value.pointer(parent_ptr)
     };
-    
+
     if let Some(val) = current_val {
         match val {
             Value::Object(map) => {
                 let mut visited = std::collections::HashSet::new();
                 let inline_key = inline_keys.get(parent_ptr).cloned();
-                
+
                 let mut level_order_changed = false;
                 if let Some(orig_keys) = original_key_orders.get(parent_ptr) {
-                    let orig_existing_keys: Vec<String> = orig_keys.iter()
+                    let orig_existing_keys: Vec<String> = orig_keys
+                        .iter()
                         .filter(|k| map.contains_key(*k))
                         .cloned()
                         .collect();
-                    let current_existing_keys: Vec<String> = map.keys()
+                    let current_existing_keys: Vec<String> = map
+                        .keys()
                         .filter(|k| orig_keys.contains(k))
                         .cloned()
                         .collect();
@@ -971,7 +1125,7 @@ fn assemble_block(
                         level_order_changed = true;
                     }
                 }
-                
+
                 // key_order_changed가 false이고 level_order_changed도 false이면 원래 순서대로 조립
                 if !key_order_changed && !level_order_changed {
                     if let Some(orig_keys) = original_key_orders.get(parent_ptr) {
@@ -983,8 +1137,10 @@ fn assemble_block(
                                 } else {
                                     format!("{}/{}", parent_ptr, k)
                                 };
-                                
-                                if let Some(block_vec) = blocks.get(parent_ptr).and_then(|m| m.get(k)) {
+
+                                if let Some(block_vec) =
+                                    blocks.get(parent_ptr).and_then(|m| m.get(k))
+                                {
                                     let is_inline = Some(k) == inline_key.as_ref();
                                     for line in block_vec {
                                         if is_inline {
@@ -995,9 +1151,20 @@ fn assemble_block(
                                         s.push('\n');
                                     }
                                     if v.is_object() || v.is_array() {
-                                        let is_empty_val = block_vec.last().map(|line| line.trim().ends_with(':')).unwrap_or(false);
+                                        let is_empty_val = block_vec
+                                            .last()
+                                            .map(|line| line.trim().ends_with(':'))
+                                            .unwrap_or(false);
                                         if is_empty_val {
-                                            s.push_str(&assemble_block(&child_ptr, updated_value, blocks, original_key_orders, key_order_changed, indent + 2, inline_keys));
+                                            s.push_str(&assemble_block(
+                                                &child_ptr,
+                                                updated_value,
+                                                blocks,
+                                                original_key_orders,
+                                                key_order_changed,
+                                                indent + 2,
+                                                inline_keys,
+                                            ));
                                         }
                                     }
                                 } else {
@@ -1007,7 +1174,7 @@ fn assemble_block(
                         }
                     }
                 }
-                
+
                 // 새로 추가된 노드 또는 순서 변경이 켜졌을 때의 렌더링
                 for (k, v) in map {
                     if visited.contains(k) {
@@ -1018,7 +1185,7 @@ fn assemble_block(
                     } else {
                         format!("{}/{}", parent_ptr, k)
                     };
-                    
+
                     if let Some(block_vec) = blocks.get(parent_ptr).and_then(|m| m.get(k)) {
                         let is_inline = Some(k) == inline_key.as_ref();
                         for line in block_vec {
@@ -1030,9 +1197,20 @@ fn assemble_block(
                             s.push('\n');
                         }
                         if v.is_object() || v.is_array() {
-                            let is_empty_val = block_vec.last().map(|line| line.trim().ends_with(':')).unwrap_or(false);
+                            let is_empty_val = block_vec
+                                .last()
+                                .map(|line| line.trim().ends_with(':'))
+                                .unwrap_or(false);
                             if is_empty_val {
-                                s.push_str(&assemble_block(&child_ptr, updated_value, blocks, original_key_orders, key_order_changed, indent + 2, inline_keys));
+                                s.push_str(&assemble_block(
+                                    &child_ptr,
+                                    updated_value,
+                                    blocks,
+                                    original_key_orders,
+                                    key_order_changed,
+                                    indent + 2,
+                                    inline_keys,
+                                ));
                             }
                         }
                     } else {
@@ -1044,7 +1222,7 @@ fn assemble_block(
                 for (i, v) in arr.iter().enumerate() {
                     let child_ptr = format!("{}/{}", parent_ptr, i);
                     let idx_str = i.to_string();
-                    
+
                     if let Some(block_vec) = blocks.get(parent_ptr).and_then(|m| m.get(&idx_str)) {
                         let inline_key = inline_keys.get(&child_ptr).cloned();
                         if inline_key.is_some() {
@@ -1063,9 +1241,20 @@ fn assemble_block(
                             }
                         }
                         if v.is_object() || v.is_array() {
-                            let is_empty_val = block_vec.last().map(|line| line.trim() == "-" || line.trim().ends_with('-')).unwrap_or(false);
+                            let is_empty_val = block_vec
+                                .last()
+                                .map(|line| line.trim() == "-" || line.trim().ends_with('-'))
+                                .unwrap_or(false);
                             if is_empty_val {
-                                s.push_str(&assemble_block(&child_ptr, updated_value, blocks, original_key_orders, key_order_changed, indent + 2, inline_keys));
+                                s.push_str(&assemble_block(
+                                    &child_ptr,
+                                    updated_value,
+                                    blocks,
+                                    original_key_orders,
+                                    key_order_changed,
+                                    indent + 2,
+                                    inline_keys,
+                                ));
                             }
                         }
                     } else {
@@ -1076,7 +1265,7 @@ fn assemble_block(
             _ => {}
         }
     }
-    
+
     if parent_ptr.is_empty() {
         if let Some(block_vec) = blocks.get("").and_then(|m| m.get("__trailing_comments")) {
             for line in block_vec {
@@ -1085,7 +1274,7 @@ fn assemble_block(
             }
         }
     }
-    
+
     s
 }
 
@@ -1237,7 +1426,13 @@ fn json_to_toml_value(json_val: &Value) -> Option<toml_edit::Value> {
 
 #[allow(dead_code)]
 fn merge_json_to_toml(toml_item: &mut toml_edit::Item, json_val: &Value, key_order_changed: bool) {
-    merge_json_to_toml_with_path(toml_item, json_val, key_order_changed, &std::collections::HashMap::new(), "")
+    merge_json_to_toml_with_path(
+        toml_item,
+        json_val,
+        key_order_changed,
+        &std::collections::HashMap::new(),
+        "",
+    )
 }
 
 fn merge_json_to_toml_with_path(
@@ -1265,11 +1460,13 @@ fn merge_json_to_toml_with_path(
                 }
 
                 let toml_keys: Vec<String> = tbl.iter().map(|(k, _)| k.to_string()).collect();
-                let json_existing_keys: Vec<String> = map.keys()
+                let json_existing_keys: Vec<String> = map
+                    .keys()
                     .filter(|k| toml_keys.contains(k))
                     .cloned()
                     .collect();
-                let toml_existing_keys: Vec<String> = toml_keys.iter()
+                let toml_existing_keys: Vec<String> = toml_keys
+                    .iter()
                     .filter(|k| map.contains_key(*k))
                     .cloned()
                     .collect();
@@ -1289,7 +1486,13 @@ fn merge_json_to_toml_with_path(
                             format!("{}/{}", parent_ptr, k)
                         };
                         if let Some(mut old_item) = backup.remove(k) {
-                            merge_json_to_toml_with_path(&mut old_item, v, key_order_changed, renamed_keys, &child_ptr);
+                            merge_json_to_toml_with_path(
+                                &mut old_item,
+                                v,
+                                key_order_changed,
+                                renamed_keys,
+                                &child_ptr,
+                            );
                             tbl.insert(k, old_item);
                         } else {
                             tbl.insert(k, json_to_toml_item(v));
@@ -1308,7 +1511,13 @@ fn merge_json_to_toml_with_path(
                             format!("{}/{}", parent_ptr, k)
                         };
                         if let Some(item) = tbl.get_mut(k) {
-                            merge_json_to_toml_with_path(item, v, key_order_changed, renamed_keys, &child_ptr);
+                            merge_json_to_toml_with_path(
+                                item,
+                                v,
+                                key_order_changed,
+                                renamed_keys,
+                                &child_ptr,
+                            );
                         } else {
                             tbl.insert(k, json_to_toml_item(v));
                         }
@@ -1335,15 +1544,18 @@ fn merge_json_to_toml_with_path(
                     }
 
                     let toml_keys: Vec<String> = tbl.iter().map(|(k, _)| k.to_string()).collect();
-                    let json_existing_keys: Vec<String> = map.keys()
+                    let json_existing_keys: Vec<String> = map
+                        .keys()
                         .filter(|k| toml_keys.contains(k))
                         .cloned()
                         .collect();
-                    let toml_existing_keys: Vec<String> = toml_keys.iter()
+                    let toml_existing_keys: Vec<String> = toml_keys
+                        .iter()
                         .filter(|k| map.contains_key(*k))
                         .cloned()
                         .collect();
-                    let order_changed = key_order_changed && (json_existing_keys != toml_existing_keys);
+                    let order_changed =
+                        key_order_changed && (json_existing_keys != toml_existing_keys);
 
                     if order_changed {
                         let mut backup = std::collections::HashMap::new();
@@ -1360,7 +1572,13 @@ fn merge_json_to_toml_with_path(
                             };
                             if let Some(old_val) = backup.remove(k) {
                                 let mut temp_item = toml_edit::Item::Value(old_val);
-                                merge_json_to_toml_with_path(&mut temp_item, v, key_order_changed, renamed_keys, &child_ptr);
+                                merge_json_to_toml_with_path(
+                                    &mut temp_item,
+                                    v,
+                                    key_order_changed,
+                                    renamed_keys,
+                                    &child_ptr,
+                                );
                                 if let toml_edit::Item::Value(new_val) = temp_item {
                                     tbl.insert(k, new_val);
                                 }
@@ -1384,7 +1602,13 @@ fn merge_json_to_toml_with_path(
                             };
                             if let Some(val) = tbl.get_mut(k) {
                                 let mut temp_item = toml_edit::Item::Value(val.clone());
-                                merge_json_to_toml_with_path(&mut temp_item, v, key_order_changed, renamed_keys, &child_ptr);
+                                merge_json_to_toml_with_path(
+                                    &mut temp_item,
+                                    v,
+                                    key_order_changed,
+                                    renamed_keys,
+                                    &child_ptr,
+                                );
                                 if let toml_edit::Item::Value(new_val) = temp_item {
                                     *val = new_val;
                                 }
@@ -1405,7 +1629,13 @@ fn merge_json_to_toml_with_path(
                             if let Some(val) = toml_arr.get_mut(idx) {
                                 let mut temp_item = toml_edit::Item::Value(val.clone());
                                 let child_ptr = format!("{}/{}", parent_ptr, idx);
-                                merge_json_to_toml_with_path(&mut temp_item, &json_arr[idx], key_order_changed, renamed_keys, &child_ptr);
+                                merge_json_to_toml_with_path(
+                                    &mut temp_item,
+                                    &json_arr[idx],
+                                    key_order_changed,
+                                    renamed_keys,
+                                    &child_ptr,
+                                );
                                 if let toml_edit::Item::Value(new_val) = temp_item {
                                     *val = new_val;
                                 }
@@ -1455,11 +1685,13 @@ fn merge_document(
         }
 
         let doc_keys: Vec<String> = doc.iter().map(|(k, _)| k.to_string()).collect();
-        let json_existing_keys: Vec<String> = map.keys()
+        let json_existing_keys: Vec<String> = map
+            .keys()
             .filter(|k| doc_keys.contains(k))
             .cloned()
             .collect();
-        let toml_existing_keys: Vec<String> = doc_keys.iter()
+        let toml_existing_keys: Vec<String> = doc_keys
+            .iter()
             .filter(|k| map.contains_key(*k))
             .cloned()
             .collect();
@@ -1487,7 +1719,13 @@ fn merge_document(
             for (k, v) in map {
                 let child_ptr = format!("/{}", k);
                 if let Some(mut old_item) = backup.remove(k) {
-                    merge_json_to_toml_with_path(&mut old_item, v, key_order_changed, renamed_keys, &child_ptr);
+                    merge_json_to_toml_with_path(
+                        &mut old_item,
+                        v,
+                        key_order_changed,
+                        renamed_keys,
+                        &child_ptr,
+                    );
                     doc.insert(k, old_item);
                 } else {
                     doc.insert(k, json_to_toml_item(v));
@@ -1519,7 +1757,13 @@ fn merge_document(
             for (k, v) in map {
                 let child_ptr = format!("/{}", k);
                 if let Some(item) = doc.get_mut(k) {
-                    merge_json_to_toml_with_path(item, v, key_order_changed, renamed_keys, &child_ptr);
+                    merge_json_to_toml_with_path(
+                        item,
+                        v,
+                        key_order_changed,
+                        renamed_keys,
+                        &child_ptr,
+                    );
                 } else {
                     doc.insert(k, json_to_toml_item(v));
                 }
@@ -1532,7 +1776,7 @@ pub fn preprocess_jsonc(input: &str) -> String {
     let mut output = String::with_capacity(input.len());
     let chars: Vec<char> = input.chars().collect();
     let mut i = 0;
-    
+
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum State {
         Normal,
@@ -1541,13 +1785,13 @@ pub fn preprocess_jsonc(input: &str) -> String {
         LineComment,
         BlockComment,
     }
-    
+
     let mut state = State::Normal;
-    
+
     while i < chars.len() {
         let c = chars[i];
         let next = chars.get(i + 1).cloned();
-        
+
         match state {
             State::Normal => {
                 if c == '"' {
@@ -1605,13 +1849,13 @@ pub fn preprocess_jsonc(input: &str) -> String {
         }
         i += 1;
     }
-    
+
     // Remove trailing commas
     let mut final_chars: Vec<char> = output.chars().collect();
     let mut last_comma_idx: Option<usize> = None;
     let mut state = State::Normal;
     let mut idx = 0;
-    
+
     while idx < final_chars.len() {
         let c = final_chars[idx];
         match state {
@@ -1644,7 +1888,7 @@ pub fn preprocess_jsonc(input: &str) -> String {
         }
         idx += 1;
     }
-    
+
     final_chars.into_iter().collect()
 }
 
@@ -1676,13 +1920,13 @@ pub fn detect(path: &str, content: &str) -> Format {
             return Format::Json;
         }
     }
-    
+
     if let Ok(val) = toml::from_str::<Value>(content) {
         if val.is_object() || val.is_array() {
             return Format::Toml;
         }
     }
-    
+
     if let Ok(val) = serde_saphyr::from_str::<Value>(content) {
         if val.is_object() || val.is_array() {
             return Format::Yaml;
@@ -1733,9 +1977,9 @@ port = 5432 # Port number
                 db.insert("host".to_string(), Value::String("127.0.0.1".to_string()));
             }
         }
-        
+
         let serialized = serialize(&value, Format::Toml, Some(original), false).unwrap();
-        
+
         // Assert comments and formatting are preserved
         assert!(serialized.contains("# Root comment"));
         assert!(serialized.contains("title = \"New App\" # App title"));
@@ -1760,12 +2004,15 @@ app:
         if let Some(app) = value.pointer_mut("/app").and_then(|v| v.as_object_mut()) {
             app.insert("name".to_string(), Value::String("new_clise".to_string()));
         }
-        if let Some(server) = value.pointer_mut("/app/server").and_then(|v| v.as_object_mut()) {
+        if let Some(server) = value
+            .pointer_mut("/app/server")
+            .and_then(|v| v.as_object_mut())
+        {
             server.insert("port".to_string(), Value::from(9000));
         }
 
         let serialized = serialize(&value, Format::Yaml, Some(original), false).unwrap();
-        
+
         assert!(serialized.contains("# System Configuration"));
         assert!(serialized.contains("name: new_clise # Application name"));
         assert!(serialized.contains("# Server settings"));
@@ -1792,7 +2039,7 @@ app:
         }
 
         let serialized = serialize(&value, Format::Yaml, Some(original), false).unwrap();
-        
+
         // Assert that System Configuration and app.name comments are preserved
         assert!(serialized.contains("# System Configuration"));
         assert!(serialized.contains("name: clise # Application name"));
@@ -1816,26 +2063,32 @@ app:
       - .:/usr/share/nginx/html # Mount point
 "#;
         let mut value = parse(original, Format::Yaml).unwrap();
-        
+
         // 1. Modify ports[0] (8080:80 -> 9090:80)
         // 2. Delete ports[1] (8443:443)
         // 3. Modify volumes[0]
-        if let Some(ports) = value.pointer_mut("/services/web/ports").and_then(|v| v.as_array_mut()) {
+        if let Some(ports) = value
+            .pointer_mut("/services/web/ports")
+            .and_then(|v| v.as_array_mut())
+        {
             ports[0] = Value::String("9090:80".to_string());
             ports.remove(1);
         }
-        if let Some(volumes) = value.pointer_mut("/services/web/volumes").and_then(|v| v.as_array_mut()) {
+        if let Some(volumes) = value
+            .pointer_mut("/services/web/volumes")
+            .and_then(|v| v.as_array_mut())
+        {
             volumes[0] = Value::String("./src:/usr/share/nginx/html".to_string());
         }
 
         let serialized = serialize(&value, Format::Yaml, Some(original), false).unwrap();
-        
+
         // Assertions
         assert!(serialized.contains("ports:"));
         assert!(serialized.contains("- \"9090:80\" # default HTTP")); // modified value + preserved comment
         assert!(!serialized.contains("8443:443")); // deleted item
         assert!(!serialized.contains("# default HTTPS")); // deleted item comment
-        
+
         assert!(serialized.contains("volumes:"));
         assert!(serialized.contains("- \"./src:/usr/share/nginx/html\" # Mount point")); // modified volume with colon
     }
@@ -1848,13 +2101,16 @@ app:
     ports:
 "#;
         let mut value = parse(original, Format::Yaml).unwrap();
-        
-        if let Some(web) = value.pointer_mut("/services/web").and_then(|v| v.as_object_mut()) {
+
+        if let Some(web) = value
+            .pointer_mut("/services/web")
+            .and_then(|v| v.as_object_mut())
+        {
             web.insert("ports".to_string(), serde_json::json!(["80:80"]));
         }
 
         let serialized = serialize(&value, Format::Yaml, Some(original), false).unwrap();
-        
+
         assert!(serialized.contains("ports:"));
         assert!(serialized.contains("      - \"80:80\""));
         assert!(!serialized.contains("        - \"80:80\""));
@@ -1868,13 +2124,13 @@ app:
     ports: []
 "#;
         let mut value = parse(original, Format::Yaml).unwrap();
-        
+
         if let Some(ports) = value.pointer_mut("/services/web/ports") {
             *ports = serde_json::json!(["80:80"]);
         }
 
         let serialized = serialize(&value, Format::Yaml, Some(original), false).unwrap();
-        
+
         assert!(serialized.contains("ports: [\"80:80\"]"));
     }
 
@@ -1887,16 +2143,21 @@ app:
       - API_URL=https://example.com/api // This is a real comment
 "#;
         let mut value = parse(original, Format::Yaml).unwrap();
-        
-        if let Some(env) = value.pointer_mut("/services/web/environment").and_then(|v| v.as_array_mut()) {
+
+        if let Some(env) = value
+            .pointer_mut("/services/web/environment")
+            .and_then(|v| v.as_array_mut())
+        {
             env[1] = Value::String("API_URL=https://example.com/v2".to_string());
         }
 
         let serialized = serialize(&value, Format::Yaml, Some(original), false).unwrap();
-        
+
         assert!(serialized.contains("- \"S3_ENDPOINT=http://10.89.0.1:9000\""));
         assert!(!serialized.contains("- \"S3_ENDPOINT=http://10.89.0.1:9000\" //10.89.0.1:9000"));
-        assert!(serialized.contains("- \"API_URL=https://example.com/v2\" // This is a real comment"));
+        assert!(
+            serialized.contains("- \"API_URL=https://example.com/v2\" // This is a real comment")
+        );
     }
 
     #[test]
@@ -1904,14 +2165,14 @@ app:
         let original = r#"image: docker-image://alpine:latest
 "#;
         let mut value = parse(original, Format::Yaml).unwrap();
-        
+
         // Value change to trigger merge logic
         if let Some(img) = value.pointer_mut("/image") {
             *img = Value::String("docker-image://alpine:3.18".to_string());
         }
 
         let serialized = serialize(&value, Format::Yaml, Some(original), false).unwrap();
-        
+
         assert!(serialized.contains("image: \"docker-image://alpine:3.18\""));
         // Ensure no redundant comment is appended after the quoted string
         assert!(!serialized.contains("\" //"));
@@ -1925,17 +2186,26 @@ app:
     meta: {a: 1, b: 2}
 "#;
         let mut value = parse(original, Format::Yaml).unwrap();
-        
-        if let Some(entrypoint) = value.pointer_mut("/services/web/entrypoint").and_then(|v| v.as_array_mut()) {
+
+        if let Some(entrypoint) = value
+            .pointer_mut("/services/web/entrypoint")
+            .and_then(|v| v.as_array_mut())
+        {
             entrypoint[2] = Value::String("python".to_string());
         }
-        if let Some(meta) = value.pointer_mut("/services/web/meta").and_then(|v| v.as_object_mut()) {
+        if let Some(meta) = value
+            .pointer_mut("/services/web/meta")
+            .and_then(|v| v.as_object_mut())
+        {
             meta.insert("a".to_string(), Value::from(3));
         }
 
         let serialized = serialize(&value, Format::Yaml, Some(original), false).unwrap();
-        
-        assert!(serialized.contains("entrypoint: [\"uv\", \"run\", \"python\", \"webtoon_scraper.py\"]"));
+
+        assert!(
+            serialized
+                .contains("entrypoint: [\"uv\", \"run\", \"python\", \"webtoon_scraper.py\"]")
+        );
         assert!(serialized.contains("meta: {a: 3, b: 2}"));
     }
 
@@ -1947,7 +2217,11 @@ app:
 "#;
         let value = parse(original, Format::Yaml).unwrap();
         let serialized = serialize(&value, Format::Yaml, Some(original), false).unwrap();
-        assert!(serialized.contains("command: [\"nginx\", \"-g\", \"daemon off;\"]"), "Serialized output:\n{}", serialized);
+        assert!(
+            serialized.contains("command: [\"nginx\", \"-g\", \"daemon off;\"]"),
+            "Serialized output:\n{}",
+            serialized
+        );
     }
 
     #[test]
@@ -1958,14 +2232,24 @@ app:
     - -g
 "#;
         let mut value = parse(original, Format::Yaml).unwrap();
-        if let Some(cmd) = value.pointer_mut("/web/command").and_then(|v| v.as_array_mut()) {
+        if let Some(cmd) = value
+            .pointer_mut("/web/command")
+            .and_then(|v| v.as_array_mut())
+        {
             cmd.push(Value::String("daemon off;".to_string()));
         }
         let serialized = serialize(&value, Format::Yaml, Some(original), false).unwrap();
-        assert!(serialized.lines().any(|l| l == "    - daemon off;"), "Expected 4-space indent. Serialized output:\n{}", serialized);
-        assert!(!serialized.lines().any(|l| l == "      - daemon off;"), "Incorrect 6-space indent found! Serialized output:\n{}", serialized);
+        assert!(
+            serialized.lines().any(|l| l == "    - daemon off;"),
+            "Expected 4-space indent. Serialized output:\n{}",
+            serialized
+        );
+        assert!(
+            !serialized.lines().any(|l| l == "      - daemon off;"),
+            "Incorrect 6-space indent found! Serialized output:\n{}",
+            serialized
+        );
     }
-
 
     #[test]
     fn test_yaml_flow_style_preservation_with_semicolon_modify() {
@@ -1975,11 +2259,18 @@ app:
     command: ["nginx", "-g", "daemon off;"]
 "#;
         let mut value = parse(original, Format::Yaml).unwrap();
-        if let Some(cmd) = value.pointer_mut("/services/web/command").and_then(|v| v.as_array_mut()) {
+        if let Some(cmd) = value
+            .pointer_mut("/services/web/command")
+            .and_then(|v| v.as_array_mut())
+        {
             cmd[2] = Value::String("daemon on;".to_string());
         }
         let serialized = serialize(&value, Format::Yaml, Some(original), false).unwrap();
-        assert!(serialized.contains("command: [\"nginx\", \"-g\", \"daemon on;\"]"), "Serialized output:\n{}", serialized);
+        assert!(
+            serialized.contains("command: [\"nginx\", \"-g\", \"daemon on;\"]"),
+            "Serialized output:\n{}",
+            serialized
+        );
     }
 
     #[test]
@@ -1996,26 +2287,30 @@ app:
         }
         let serialized = serialize(&value, Format::Yaml, Some(original), false).unwrap();
         println!("serialized:\n{}", serialized);
-        
-        assert!(serialized.lines().any(|l| l == "      - path: ./basic.env"), "Expected inline array item, but got:\n{}", serialized);
-        assert!(!serialized.lines().any(|l| l == "      -"), "Hyphen should not be on its own line! Serialized output:\n{}", serialized);
+
+        assert!(
+            serialized.lines().any(|l| l == "      - path: ./basic.env"),
+            "Expected inline array item, but got:\n{}",
+            serialized
+        );
+        assert!(
+            !serialized.lines().any(|l| l == "      -"),
+            "Hyphen should not be on its own line! Serialized output:\n{}",
+            serialized
+        );
     }
-
-
-
-
 
     #[test]
     fn test_yaml_key_reordering() {
         let original = "a: 1\nb: 2\nc:\n  d: 3\n  e: 4\n";
         let mut value = parse(original, Format::Yaml).unwrap();
-        
+
         if let Some(obj) = value.as_object_mut() {
             let mut items: Vec<(String, Value)> = std::mem::take(obj).into_iter().collect();
             items.swap(0, 1); // b, a
             *obj = items.into_iter().collect();
         }
-        
+
         if let Some(c_obj) = value.pointer_mut("/c").and_then(|v| v.as_object_mut()) {
             let mut items: Vec<(String, Value)> = std::mem::take(c_obj).into_iter().collect();
             items.swap(0, 1); // e, d
@@ -2024,11 +2319,11 @@ app:
 
         let serialized = serialize(&value, Format::Yaml, Some(original), true).unwrap();
         println!("serialized YAML:\n{}", serialized);
-        
+
         let idx_b = serialized.find("b:").unwrap();
         let idx_a = serialized.find("a:").unwrap();
         assert!(idx_b < idx_a, "b should come before a");
-        
+
         let idx_e = serialized.find("e:").unwrap();
         let idx_d = serialized.find("d:").unwrap();
         assert!(idx_e < idx_d, "e should come before d");
@@ -2038,13 +2333,13 @@ app:
     fn test_toml_key_reordering() {
         let original = "a = 1\nb = 2\n[c]\nd = 3\ne = 4\n";
         let mut value = parse(original, Format::Toml).unwrap();
-        
+
         if let Some(obj) = value.as_object_mut() {
             let mut items: Vec<(String, Value)> = std::mem::take(obj).into_iter().collect();
             items.swap(0, 1); // b, a
             *obj = items.into_iter().collect();
         }
-        
+
         if let Some(c_obj) = value.pointer_mut("/c").and_then(|v| v.as_object_mut()) {
             let mut items: Vec<(String, Value)> = std::mem::take(c_obj).into_iter().collect();
             items.swap(0, 1); // e, d
@@ -2053,11 +2348,11 @@ app:
 
         let serialized = serialize(&value, Format::Toml, Some(original), true).unwrap();
         println!("serialized TOML:\n{}", serialized);
-        
+
         let idx_b = serialized.find("b =").unwrap();
         let idx_a = serialized.find("a =").unwrap();
         assert!(idx_b < idx_a, "b should come before a");
-        
+
         let idx_e = serialized.find("e =").unwrap();
         let idx_d = serialized.find("d =").unwrap();
         assert!(idx_e < idx_d, "e should come before d");
@@ -2100,19 +2395,35 @@ app:
         }
 
         let serialized = serialize(&value, Format::Jsonc, Some(original), false).unwrap();
-        
+
         assert!(serialized.contains("// This is a header comment"));
-        assert!(serialized.contains("\"a\": 10, // Inline comment for a") || serialized.contains("\"a\": 10,// Inline comment for a"), "Serialized was: {}", serialized);
+        assert!(
+            serialized.contains("\"a\": 10, // Inline comment for a")
+                || serialized.contains("\"a\": 10,// Inline comment for a"),
+            "Serialized was: {}",
+            serialized
+        );
         assert!(serialized.contains("/* Block comment for b */"));
-        assert!(serialized.contains("2, // Comment for index 0") || serialized.contains("2,// Comment for index 0"), "Serialized was: {}", serialized);
+        assert!(
+            serialized.contains("2, // Comment for index 0")
+                || serialized.contains("2,// Comment for index 0"),
+            "Serialized was: {}",
+            serialized
+        );
         assert!(serialized.contains("4"));
     }
 
     #[test]
     fn test_jsonc_detect() {
         assert_eq!(detect("test.jsonc", ""), Format::Jsonc);
-        assert_eq!(detect("test.conf", "{\n  // comment\n  \"a\": 1\n}"), Format::Jsonc);
-        assert_eq!(detect("test.conf", "{\n  /* comment */\n  \"a\": 1\n}"), Format::Jsonc);
+        assert_eq!(
+            detect("test.conf", "{\n  // comment\n  \"a\": 1\n}"),
+            Format::Jsonc
+        );
+        assert_eq!(
+            detect("test.conf", "{\n  /* comment */\n  \"a\": 1\n}"),
+            Format::Jsonc
+        );
         assert_eq!(detect("test.conf", "{\n  \"a\": 1,\n}"), Format::Jsonc);
     }
 
@@ -2132,7 +2443,7 @@ app:
         }
         let serialized = serialize(&value, Format::Jsonc, Some(original), false).unwrap();
         println!("serialized jsonc:\n{}", serialized);
-        
+
         assert!(serialized.contains("/* * 서버 네트워크 및 연결 설정"));
         assert!(serialized.contains("   * 내부망과 외부망 포트를 분리하여 보안을 강화함"));
         assert!(serialized.contains("   */"));
@@ -2149,19 +2460,35 @@ app:
 "#;
         let mut value = parse(original_yaml, Format::Yaml).unwrap();
         // Rename "web" to "web_service"
-        if let Some(services) = value.pointer_mut("/services").and_then(|v| v.as_object_mut()) {
+        if let Some(services) = value
+            .pointer_mut("/services")
+            .and_then(|v| v.as_object_mut())
+        {
             if let Some(web_val) = services.remove("web") {
                 services.insert("web_service".to_string(), web_val);
             }
         }
-        
+
         let mut renamed_keys = std::collections::HashMap::new();
         renamed_keys.insert("/services/web_service".to_string(), "web".to_string());
-        
-        let serialized_yaml = serialize_with_renames(&value, Format::Yaml, Some(original_yaml), false, &renamed_keys).unwrap();
+
+        let serialized_yaml = serialize_with_renames(
+            &value,
+            Format::Yaml,
+            Some(original_yaml),
+            false,
+            &renamed_keys,
+        )
+        .unwrap();
         println!("serialized yaml:\n{}", serialized_yaml);
-        assert!(serialized_yaml.contains("# This is a comment for web service"), "Comment lost in YAML!");
-        assert!(serialized_yaml.contains("web_service:"), "Key not renamed in YAML!");
+        assert!(
+            serialized_yaml.contains("# This is a comment for web service"),
+            "Comment lost in YAML!"
+        );
+        assert!(
+            serialized_yaml.contains("web_service:"),
+            "Key not renamed in YAML!"
+        );
 
         // Test JSONC
         let original_jsonc = r#"{
@@ -2177,14 +2504,27 @@ app:
                 obj.insert("web_service".to_string(), web_val);
             }
         }
-        
+
         let mut renamed_keys_jsonc = std::collections::HashMap::new();
         renamed_keys_jsonc.insert("/web_service".to_string(), "web".to_string());
-        
-        let serialized_jsonc = serialize_with_renames(&value_jsonc, Format::Jsonc, Some(original_jsonc), false, &renamed_keys_jsonc).unwrap();
+
+        let serialized_jsonc = serialize_with_renames(
+            &value_jsonc,
+            Format::Jsonc,
+            Some(original_jsonc),
+            false,
+            &renamed_keys_jsonc,
+        )
+        .unwrap();
         println!("serialized jsonc:\n{}", serialized_jsonc);
-        assert!(serialized_jsonc.contains("// This is a comment for web service"), "Comment lost in JSONC!");
-        assert!(serialized_jsonc.contains("\"web_service\":"), "Key not renamed in JSONC!");
+        assert!(
+            serialized_jsonc.contains("// This is a comment for web service"),
+            "Comment lost in JSONC!"
+        );
+        assert!(
+            serialized_jsonc.contains("\"web_service\":"),
+            "Key not renamed in JSONC!"
+        );
 
         // Test TOML
         let original_toml = r#"
@@ -2199,14 +2539,27 @@ image = "nginx" # nginx image
                 obj.insert("web_service".to_string(), web_val);
             }
         }
-        
+
         let mut renamed_keys_toml = std::collections::HashMap::new();
         renamed_keys_toml.insert("/web_service".to_string(), "web".to_string());
-        
-        let serialized_toml = serialize_with_renames(&value_toml, Format::Toml, Some(original_toml), false, &renamed_keys_toml).unwrap();
+
+        let serialized_toml = serialize_with_renames(
+            &value_toml,
+            Format::Toml,
+            Some(original_toml),
+            false,
+            &renamed_keys_toml,
+        )
+        .unwrap();
         println!("serialized toml:\n{}", serialized_toml);
-        assert!(serialized_toml.contains("# Comment for web"), "Comment lost in TOML!");
-        assert!(serialized_toml.contains("[web_service]"), "Key not renamed in TOML!");
+        assert!(
+            serialized_toml.contains("# Comment for web"),
+            "Comment lost in TOML!"
+        );
+        assert!(
+            serialized_toml.contains("[web_service]"),
+            "Key not renamed in TOML!"
+        );
     }
 
     #[test]
@@ -2224,7 +2577,7 @@ services:
         let value = parse(original, Format::Yaml).unwrap();
         let serialized = serialize(&value, Format::Yaml, Some(original), false).unwrap();
         println!("serialized YAML block scalar:\n{}", serialized);
-        
+
         let expected = r#"name: build-test
 services:
   app-detailed:
@@ -2234,25 +2587,64 @@ services:
         RUN echo "inline build"
         CMD ["sleep", "3600"]
       other_field: 123"#;
-        
+
         assert_eq!(serialized.trim(), expected.trim());
     }
 
     #[test]
     fn test_serialize_leaf_yaml_special_starts() {
-        assert_eq!(serialize_leaf_yaml(&Value::String("#alpine".to_string())), "\"#alpine\"");
-        assert_eq!(serialize_leaf_yaml(&Value::String("//path".to_string())), "\"//path\"");
-        assert_eq!(serialize_leaf_yaml(&Value::String("normal".to_string())), "normal");
-        assert_eq!(serialize_leaf_yaml(&Value::String("with:colon".to_string())), "\"with:colon\"");
-        assert_eq!(serialize_leaf_yaml(&Value::String("true".to_string())), "\"true\"");
-        assert_eq!(serialize_leaf_yaml(&Value::String("false".to_string())), "\"false\"");
-        assert_eq!(serialize_leaf_yaml(&Value::String("True".to_string())), "\"True\"");
-        assert_eq!(serialize_leaf_yaml(&Value::String("FALSE".to_string())), "\"FALSE\"");
-        assert_eq!(serialize_leaf_yaml(&Value::String("null".to_string())), "\"null\"");
-        assert_eq!(serialize_leaf_yaml(&Value::String("Null".to_string())), "\"Null\"");
-        assert_eq!(serialize_leaf_yaml(&Value::String("~".to_string())), "\"~\"");
-        assert_eq!(serialize_leaf_yaml(&Value::String("123".to_string())), "\"123\"");
-        assert_eq!(serialize_leaf_yaml(&Value::String("45.6".to_string())), "\"45.6\"");
+        assert_eq!(
+            serialize_leaf_yaml(&Value::String("#alpine".to_string())),
+            "\"#alpine\""
+        );
+        assert_eq!(
+            serialize_leaf_yaml(&Value::String("//path".to_string())),
+            "\"//path\""
+        );
+        assert_eq!(
+            serialize_leaf_yaml(&Value::String("normal".to_string())),
+            "normal"
+        );
+        assert_eq!(
+            serialize_leaf_yaml(&Value::String("with:colon".to_string())),
+            "\"with:colon\""
+        );
+        assert_eq!(
+            serialize_leaf_yaml(&Value::String("true".to_string())),
+            "\"true\""
+        );
+        assert_eq!(
+            serialize_leaf_yaml(&Value::String("false".to_string())),
+            "\"false\""
+        );
+        assert_eq!(
+            serialize_leaf_yaml(&Value::String("True".to_string())),
+            "\"True\""
+        );
+        assert_eq!(
+            serialize_leaf_yaml(&Value::String("FALSE".to_string())),
+            "\"FALSE\""
+        );
+        assert_eq!(
+            serialize_leaf_yaml(&Value::String("null".to_string())),
+            "\"null\""
+        );
+        assert_eq!(
+            serialize_leaf_yaml(&Value::String("Null".to_string())),
+            "\"Null\""
+        );
+        assert_eq!(
+            serialize_leaf_yaml(&Value::String("~".to_string())),
+            "\"~\""
+        );
+        assert_eq!(
+            serialize_leaf_yaml(&Value::String("123".to_string())),
+            "\"123\""
+        );
+        assert_eq!(
+            serialize_leaf_yaml(&Value::String("45.6".to_string())),
+            "\"45.6\""
+        );
     }
 
     #[test]

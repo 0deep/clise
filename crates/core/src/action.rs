@@ -1,5 +1,5 @@
-use serde_json::Value;
 use crate::format::Format;
+use serde_json::Value;
 
 /// Actions requested by the widget to the host application
 #[derive(Debug, Clone)]

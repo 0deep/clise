@@ -1,9 +1,9 @@
+use clise_core::config::CliseConfig;
+use clise_core::format::{Format, detect, serialize};
+use clise_core::schema::SchemaFetcher;
+use serde_json::{Map, Value};
 use std::fs;
 use std::path::Path;
-use serde_json::{Value, Map};
-use clise_core::format::{Format, serialize, detect};
-use clise_core::schema::SchemaFetcher;
-use clise_core::config::CliseConfig;
 
 pub async fn run(
     file: String,
@@ -15,7 +15,10 @@ pub async fn run(
     // 1. Check duplicate file
     let path = Path::new(&file);
     if path.exists() && !force {
-        eprintln!("Error: File '{}' already exists. Use --force to overwrite.", file);
+        eprintln!(
+            "Error: File '{}' already exists. Use --force to overwrite.",
+            file
+        );
         std::process::exit(1);
     }
 
@@ -43,7 +46,10 @@ pub async fn run(
             match clise_core::format::parse(&s_content, s_format) {
                 Ok(s) => s,
                 Err(e) => {
-                    eprintln!("Error parsing schema file '{}' as {:?}: {}", schema_path, s_format, e);
+                    eprintln!(
+                        "Error parsing schema file '{}' as {:?}: {}",
+                        schema_path, s_format, e
+                    );
                     std::process::exit(1);
                 }
             }
@@ -67,7 +73,10 @@ pub async fn run(
         let schema_url = match url {
             Some(u) => u,
             None => {
-                eprintln!("Error: No schema mapping found for file '{}'. Please specify one using --schema.", file);
+                eprintln!(
+                    "Error: No schema mapping found for file '{}'. Please specify one using --schema.",
+                    file
+                );
                 std::process::exit(1);
             }
         };
@@ -95,7 +104,10 @@ pub async fn run(
             "yaml" | "yml" => Format::Yaml,
             "toml" => Format::Toml,
             other => {
-                eprintln!("Error: Unsupported format '{}'. Supported: json, jsonc, yaml, toml", other);
+                eprintln!(
+                    "Error: Unsupported format '{}'. Supported: json, jsonc, yaml, toml",
+                    other
+                );
                 std::process::exit(1);
             }
         }
@@ -136,7 +148,12 @@ fn generate_skeleton(schema_val: &Value) -> Value {
         let mut required_fields: Vec<String> = schema_val
             .get("required")
             .and_then(|r| r.as_array())
-            .map(|arr| arr.iter().filter_map(|v| v.as_str()).map(|s| s.to_string()).collect())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str())
+                    .map(|s| s.to_string())
+                    .collect()
+            })
             .unwrap_or_default();
 
         // Fallback: if required list is empty, treat all properties as required for template skeleton
@@ -147,7 +164,10 @@ fn generate_skeleton(schema_val: &Value) -> Value {
         for field in &required_fields {
             if let Some(prop_info) = properties.get(field) {
                 let default_val = prop_info.get("default").cloned().unwrap_or_else(|| {
-                    let type_str = prop_info.get("type").and_then(|t| t.as_str()).unwrap_or("string");
+                    let type_str = prop_info
+                        .get("type")
+                        .and_then(|t| t.as_str())
+                        .unwrap_or("string");
                     match type_str {
                         "string" => Value::String("".to_string()),
                         "integer" | "number" => Value::Number(0.into()),
@@ -196,7 +216,10 @@ mod tests {
         });
 
         let skeleton = generate_skeleton(&schema);
-        assert_eq!(skeleton.get("name").unwrap().as_str().unwrap(), "test-project");
+        assert_eq!(
+            skeleton.get("name").unwrap().as_str().unwrap(),
+            "test-project"
+        );
         assert_eq!(skeleton.get("version").unwrap().as_str().unwrap(), "");
         assert_eq!(skeleton.get("count").unwrap().as_i64().unwrap(), 0);
         assert_eq!(skeleton.get("ok").unwrap().as_bool().unwrap(), true);
@@ -219,7 +242,10 @@ mod tests {
         });
 
         let skeleton = generate_skeleton(&schema);
-        assert_eq!(skeleton.get("name").unwrap().as_str().unwrap(), "default-name");
+        assert_eq!(
+            skeleton.get("name").unwrap().as_str().unwrap(),
+            "default-name"
+        );
         assert_eq!(skeleton.get("version").unwrap().as_str().unwrap(), "");
     }
 }

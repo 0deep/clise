@@ -1,7 +1,7 @@
 pub mod format;
-pub mod validate;
-pub mod schema;
 pub mod init;
+pub mod schema;
+pub mod validate;
 
 use clap::{Parser, Subcommand};
 
@@ -91,9 +91,7 @@ pub enum SchemaCommands {
     /// List active schema mappings
     List,
     /// Show the schema mapping URL for a specific file
-    Show {
-        file: String,
-    },
+    Show { file: String },
     /// Map a file pattern to a schema URL
     Map {
         pattern: String,

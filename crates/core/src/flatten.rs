@@ -1,9 +1,23 @@
-use serde_json::Value;
 use crate::state::{EditorState, NodeType, UiNode, ValueType};
+use serde_json::Value;
 
-pub fn rebuild_flattened(data: &Value, prev_nodes: &[UiNode], show_child_counts: bool, schema: Option<&Value>) -> Vec<UiNode> {
+pub fn rebuild_flattened(
+    data: &Value,
+    prev_nodes: &[UiNode],
+    show_child_counts: bool,
+    schema: Option<&Value>,
+) -> Vec<UiNode> {
     let mut nodes = Vec::new();
-    flatten_recursive(data, Vec::new(), 0, "root".to_string(), prev_nodes, &mut nodes, show_child_counts, schema);
+    flatten_recursive(
+        data,
+        Vec::new(),
+        0,
+        "root".to_string(),
+        prev_nodes,
+        &mut nodes,
+        show_child_counts,
+        schema,
+    );
     nodes
 }
 
@@ -18,8 +32,12 @@ fn flatten_recursive(
     schema: Option<&Value>,
 ) {
     let mut node_type = match value {
-        Value::Object(map) => NodeType::Object { child_count: map.len() },
-        Value::Array(arr) => NodeType::Array { child_count: arr.len() },
+        Value::Object(map) => NodeType::Object {
+            child_count: map.len(),
+        },
+        Value::Array(arr) => NodeType::Array {
+            child_count: arr.len(),
+        },
         _ => NodeType::Leaf,
     };
 
@@ -51,7 +69,7 @@ fn flatten_recursive(
     }
 
     let value_display = get_value_display(value, show_child_counts);
-    
+
     // Find if this path was expanded before
     let expanded = match node_type {
         NodeType::Leaf => false,
@@ -166,7 +184,11 @@ impl EditorState {
     pub fn rebuild_flattened_impl(&mut self, expand_changed_from: Option<&Value>) {
         // 1. Update current flattened_nodes' expanded states into the cache
         for node in &self.flattened_nodes {
-            if let Some(cached_node) = self.all_nodes_cache.iter_mut().find(|n| n.path == node.path) {
+            if let Some(cached_node) = self
+                .all_nodes_cache
+                .iter_mut()
+                .find(|n| n.path == node.path)
+            {
                 cached_node.expanded = node.expanded;
             } else {
                 self.all_nodes_cache.push(node.clone());
@@ -182,7 +204,9 @@ impl EditorState {
                 let mut current = Vec::new();
                 for part in &path {
                     current.push(part.clone());
-                    if let Some(cached_node) = self.all_nodes_cache.iter_mut().find(|n| n.path == current) {
+                    if let Some(cached_node) =
+                        self.all_nodes_cache.iter_mut().find(|n| n.path == current)
+                    {
                         cached_node.expanded = true;
                     } else {
                         self.all_nodes_cache.push(UiNode {
@@ -200,7 +224,12 @@ impl EditorState {
         }
 
         // 2. Rebuild using all_nodes_cache as the reference for previous states
-        self.flattened_nodes = rebuild_flattened(&self.data, &self.all_nodes_cache, self.show_child_counts, self.schema.as_ref());
+        self.flattened_nodes = rebuild_flattened(
+            &self.data,
+            &self.all_nodes_cache,
+            self.show_child_counts,
+            self.schema.as_ref(),
+        );
     }
 }
 
@@ -216,7 +245,7 @@ mod tests {
             "active": true
         });
         let nodes = rebuild_flattened(&data, &[], true, None);
-        
+
         // Root + 2 children (preserved insertion order: name, active)
         assert_eq!(nodes.len(), 3);
         assert_eq!(nodes[0].key, "root");
@@ -234,7 +263,7 @@ mod tests {
             }
         });
         let nodes = rebuild_flattened(&data, &[], true, None);
-        
+
         // Root (expanded)
         // nested (collapsed by default)
         assert_eq!(nodes.len(), 2);
@@ -255,7 +284,7 @@ mod tests {
         });
         let mut counts = Vec::new();
         count_nodes_per_level(&data, 0, &mut counts);
-        
+
         // Depth 0: root (1)
         // Depth 1: a, e (2)
         // Depth 2: b, c (2)
@@ -271,19 +300,17 @@ mod tests {
             }
         });
         // Pre-expand "nested"
-        let prev_nodes = vec![
-            UiNode {
-                path: vec!["nested".to_string()],
-                depth: 1,
-                key: "nested".to_string(),
-                value_display: "".to_string(),
-                value_type: ValueType::Object,
-                node_type: NodeType::Object { child_count: 1 },
-                expanded: true,
-            }
-        ];
+        let prev_nodes = vec![UiNode {
+            path: vec!["nested".to_string()],
+            depth: 1,
+            key: "nested".to_string(),
+            value_display: "".to_string(),
+            value_type: ValueType::Object,
+            node_type: NodeType::Object { child_count: 1 },
+            expanded: true,
+        }];
         let nodes = rebuild_flattened(&data, &prev_nodes, true, None);
-        
+
         assert_eq!(nodes.len(), 3);
         assert_eq!(nodes[2].key, "key");
         assert_eq!(nodes[2].depth, 2);
@@ -296,7 +323,10 @@ mod tests {
         assert_eq!(get_value_display(&json!(123), true), "123");
         assert_eq!(get_value_display(&json!("hello"), true), "\"hello\"");
         assert_eq!(get_value_display(&json!([1, 2, 3]), true), "[3 items]");
-        assert_eq!(get_value_display(&json!({"a": 1, "b": 2}), true), "{2 keys}");
+        assert_eq!(
+            get_value_display(&json!({"a": 1, "b": 2}), true),
+            "{2 keys}"
+        );
 
         assert_eq!(get_value_display(&json!([1, 2, 3]), false), "");
         assert_eq!(get_value_display(&json!({"a": 1, "b": 2}), false), "");
@@ -313,7 +343,7 @@ mod tests {
             "a": []
         });
         let nodes = rebuild_flattened(&data, &[], true, None);
-        
+
         for node in &nodes {
             match node.key.as_str() {
                 "a" => assert_eq!(node.value_type, ValueType::Array),
@@ -334,7 +364,7 @@ mod tests {
             "arr": [1, 2],
             "obj": {"a": 1}
         });
-        
+
         // With counts (default)
         let nodes_on = rebuild_flattened(&data, &[], true, None);
         let arr_node_on = nodes_on.iter().find(|n| n.key == "arr").unwrap();

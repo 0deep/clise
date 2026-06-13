@@ -1,8 +1,12 @@
-use std::io::{self, Read};
+use clise_core::format::{Format, detect, parse, serialize};
 use std::fs;
-use clise_core::format::{Format, parse, serialize, detect};
+use std::io::{self, Read};
 
-pub fn run(file: Option<String>, to: Option<String>, write: bool) -> Result<(), Box<dyn std::error::Error>> {
+pub fn run(
+    file: Option<String>,
+    to: Option<String>,
+    write: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     // 1. Read content from file or stdin
     let (content, _is_stdin, filepath) = match file.as_deref() {
         None | Some("-") => {

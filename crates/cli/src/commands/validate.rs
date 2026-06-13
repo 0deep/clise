@@ -1,8 +1,8 @@
-use std::fs;
-use serde_json::Value;
-use clise_core::format::{parse, detect};
-use clise_core::schema::SchemaFetcher;
 use clise_core::config::CliseConfig;
+use clise_core::format::{detect, parse};
+use clise_core::schema::SchemaFetcher;
+use serde_json::Value;
+use std::fs;
 
 pub async fn run(
     file: String,
@@ -16,7 +16,10 @@ pub async fn run(
         Err(e) => {
             if !quiet {
                 eprintln!("\n\x1b[1;31mValidation failed\x1b[0m\n");
-                eprintln!("      \x1b[1;31mError:\x1b[0m Failed to read file '{}': {}\n", file, e);
+                eprintln!(
+                    "      \x1b[1;31mError:\x1b[0m Failed to read file '{}': {}\n",
+                    file, e
+                );
             }
             std::process::exit(1);
         }
@@ -28,7 +31,10 @@ pub async fn run(
         Err(e) => {
             if !quiet {
                 eprintln!("\n\x1b[1;31mValidation failed\x1b[0m\n");
-                eprintln!("      \x1b[1;31mError:\x1b[0m Failed to parse data file as {:?}: {}\n", format, e);
+                eprintln!(
+                    "      \x1b[1;31mError:\x1b[0m Failed to parse data file as {:?}: {}\n",
+                    format, e
+                );
             }
             std::process::exit(1);
         }
@@ -43,7 +49,10 @@ pub async fn run(
                 Err(e) => {
                     if !quiet {
                         eprintln!("\n\x1b[1;31mValidation failed\x1b[0m\n");
-                        eprintln!("      \x1b[1;31mError:\x1b[0m Failed to fetch schema from URL '{}': {}\n", schema_path, e);
+                        eprintln!(
+                            "      \x1b[1;31mError:\x1b[0m Failed to fetch schema from URL '{}': {}\n",
+                            schema_path, e
+                        );
                     }
                     std::process::exit(1);
                 }
@@ -55,7 +64,10 @@ pub async fn run(
                 Err(e) => {
                     if !quiet {
                         eprintln!("\n\x1b[1;31mValidation failed\x1b[0m\n");
-                        eprintln!("      \x1b[1;31mError:\x1b[0m Failed to read schema file '{}': {}\n", schema_path, e);
+                        eprintln!(
+                            "      \x1b[1;31mError:\x1b[0m Failed to read schema file '{}': {}\n",
+                            schema_path, e
+                        );
                     }
                     std::process::exit(1);
                 }
@@ -66,7 +78,10 @@ pub async fn run(
                 Err(e) => {
                     if !quiet {
                         eprintln!("\n\x1b[1;31mValidation failed\x1b[0m\n");
-                        eprintln!("      \x1b[1;31mError:\x1b[0m Failed to parse schema file as {:?}: {}\n", s_format, e);
+                        eprintln!(
+                            "      \x1b[1;31mError:\x1b[0m Failed to parse schema file as {:?}: {}\n",
+                            s_format, e
+                        );
                     }
                     std::process::exit(1);
                 }
@@ -93,7 +108,10 @@ pub async fn run(
             None => {
                 if !quiet {
                     eprintln!("\n\x1b[1;31mValidation failed\x1b[0m\n");
-                    eprintln!("      \x1b[1;31mError:\x1b[0m No schema mapping found for file '{}'. Please specify one using --schema.\n", file);
+                    eprintln!(
+                        "      \x1b[1;31mError:\x1b[0m No schema mapping found for file '{}'. Please specify one using --schema.\n",
+                        file
+                    );
                 }
                 std::process::exit(1);
             }
@@ -109,7 +127,10 @@ pub async fn run(
             Err(e) => {
                 if !quiet {
                     eprintln!("\n\x1b[1;31mValidation failed\x1b[0m\n");
-                    eprintln!("      \x1b[1;31mError:\x1b[0m Failed to fetch schema from URL '{}': {}\n", schema_url, e);
+                    eprintln!(
+                        "      \x1b[1;31mError:\x1b[0m Failed to fetch schema from URL '{}': {}\n",
+                        schema_url, e
+                    );
                 }
                 std::process::exit(1);
             }
@@ -124,11 +145,15 @@ pub async fn run(
         jsonschema::validator_for(&schema_val_clone).map(|validator| {
             let mut errors = Vec::new();
             for error in validator.iter_errors(&data_val_clone) {
-                errors.push((error.instance_path().to_string(), format_validation_error(&error)));
+                errors.push((
+                    error.instance_path().to_string(),
+                    format_validation_error(&error),
+                ));
             }
             errors
         })
-    }).await?;
+    })
+    .await?;
 
     match validation_res {
         Ok(errors) => {
@@ -136,7 +161,11 @@ pub async fn run(
                 if !quiet {
                     eprintln!("\n\x1b[1;31mValidation failed\x1b[0m\n");
                     for (i, (path, err_msg)) in errors.iter().enumerate() {
-                        eprintln!("  \x1b[1;33m[{}]\x1b[0m \x1b[1mPath :\x1b[0m {}", i + 1, path);
+                        eprintln!(
+                            "  \x1b[1;33m[{}]\x1b[0m \x1b[1mPath :\x1b[0m {}",
+                            i + 1,
+                            path
+                        );
                         eprintln!("      \x1b[1;31mError:\x1b[0m {}\n", err_msg);
                     }
                 }
@@ -154,7 +183,7 @@ pub async fn run(
     if !quiet {
         println!("\x1b[1;32mValidation successful\x1b[0m");
     }
-    
+
     Ok(())
 }
 
@@ -171,7 +200,7 @@ fn format_validation_error(error: &jsonschema::ValidationError) -> String {
         }
         other => other.to_string(),
     };
-    
+
     let msg = error.to_string();
     let raw_instance = error.instance().to_string();
     if msg.starts_with(&raw_instance) {

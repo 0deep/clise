@@ -1,21 +1,17 @@
 mod commands;
 
-use std::io::{self, IsTerminal, Read};
-use std::sync::Arc;
-use tokio::sync::Mutex;
-use ratatui::{
-    backend::CrosstermBackend,
-    Terminal,
-    widgets::Block,
-};
+use clise_core::prelude::*;
+use clise_core::schema::SchemaFetcher;
 use crossterm::{
     event::{Event, EventStream},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use futures::StreamExt;
-use clise_core::prelude::*;
-use clise_core::schema::SchemaFetcher;
+use ratatui::{Terminal, backend::CrosstermBackend, widgets::Block};
+use std::io::{self, IsTerminal, Read};
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
 use clap::Parser;
 use commands::{Cli, Commands};
@@ -29,25 +25,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Commands::Format { file, to, write } => {
                 commands::format::run(file, to, write)?;
             }
-            Commands::Validate { file, schema, quiet, catalog_match } => {
+            Commands::Validate {
+                file,
+                schema,
+                quiet,
+                catalog_match,
+            } => {
                 commands::validate::run(file, schema, quiet, catalog_match).await?;
             }
             Commands::Schema { cmd } => {
                 commands::schema::run(cmd).await?;
             }
-            Commands::Init { file, schema, force, catalog_match } => {
+            Commands::Init {
+                file,
+                schema,
+                force,
+                catalog_match,
+            } => {
                 commands::init::run(file, schema, force, cli.format, catalog_match).await?;
             }
             Commands::GenerateCompletion { shell } => {
                 use clap::CommandFactory;
-                use clap_complete::{generate, Shell};
+                use clap_complete::{Shell, generate};
                 use std::str::FromStr;
 
                 let mut cmd = Cli::command();
                 let shell_enum = match Shell::from_str(&shell.to_lowercase()) {
                     Ok(s) => s,
                     Err(_) => {
-                        eprintln!("Error: Invalid shell '{}'. Supported: bash, zsh, fish, powershell, elvish", shell);
+                        eprintln!(
+                            "Error: Invalid shell '{}'. Supported: bash, zsh, fish, powershell, elvish",
+                            shell
+                        );
                         std::process::exit(1);
                     }
                 };
@@ -123,7 +132,10 @@ async fn run_tui(
         "toml" => Format::Toml,
         "yaml" | "yml" => Format::Yaml,
         other => {
-            eprintln!("Error: Unsupported format '{}'. Supported: json, jsonc, toml, yaml", other);
+            eprintln!(
+                "Error: Unsupported format '{}'. Supported: json, jsonc, toml, yaml",
+                other
+            );
             std::process::exit(1);
         }
     });
@@ -182,14 +194,20 @@ async fn run_tui(
     let mut terminal = Terminal::new(backend)?;
 
     // Run TUI app
-    let result = run_app(&mut terminal, json_data, filename, format, original_content, schema_override, catalog_match).await;
+    let result = run_app(
+        &mut terminal,
+        json_data,
+        filename,
+        format,
+        original_content,
+        schema_override,
+        catalog_match,
+    )
+    .await;
 
     // Restore terminal
     disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-    )?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen,)?;
     terminal.show_cursor()?;
 
     if let Ok(Some(output_content)) = &result {
@@ -215,18 +233,19 @@ async fn run_app(
     let mut editor_state = EditorState::new(json_data, format, filename.clone(), original_content);
     // In the demo, adjust expansion based on height excluding borders and status bar (roughly height - 3)
     editor_state.auto_adjust_expansion(terminal_size.height.saturating_sub(3) as usize);
-    
+
     let state = Arc::new(Mutex::new(editor_state));
     let theme = Theme::default();
     let config = Arc::new(Mutex::new(CliseConfig::load_or_init()));
-    
+
     // Schema fetcher task for the current file - Start ASAP
     if let Some(fname) = filename.clone() {
         let state_clone = state.clone();
         let config_clone = config.clone();
         let cat_match = catalog_match.clone();
         tokio::spawn(async move {
-            fetch_schema_with_logic(state_clone, config_clone, fname, schema_override, cat_match).await;
+            fetch_schema_with_logic(state_clone, config_clone, fname, schema_override, cat_match)
+                .await;
         });
     }
 
@@ -250,8 +269,7 @@ async fn run_app(
                         "".to_string()
                     }
                 );
-                let widget = SchemaEditor::new(&theme)
-                    .block(Block::bordered().title(title));
+                let widget = SchemaEditor::new(&theme).block(Block::bordered().title(title));
                 f.render_stateful_widget(widget, area, &mut *s);
             })?;
         }
@@ -266,7 +284,7 @@ async fn run_app(
                         let mut s = state.lock().await;
                         s.handle_key_event(key)
                     };
-                    
+
                     match action {
                         Action::Quit => break,
                         Action::Save { data, format } => {
@@ -343,7 +361,6 @@ async fn run_app(
     Ok(output_text)
 }
 
-
 async fn fetch_schema_with_logic(
     state: Arc<Mutex<EditorState>>,
     config: Arc<Mutex<CliseConfig>>,
@@ -359,7 +376,7 @@ async fn fetch_schema_with_logic(
             return;
         }
     };
-    
+
     {
         let mut s = state.lock().await;
         s.schema_state = SchemaState::Loading;
@@ -376,7 +393,8 @@ async fn fetch_schema_with_logic(
             }
             Err(e) => {
                 let mut s = state.lock().await;
-                s.schema_state = SchemaState::Error(format!("Override schema download error: {}", e));
+                s.schema_state =
+                    SchemaState::Error(format!("Override schema download error: {}", e));
             }
         }
         return;
@@ -409,7 +427,7 @@ async fn fetch_schema_with_logic(
     match fetcher.fetch_catalog().await {
         Ok(catalog) => {
             let fetcher_arc = Arc::new(fetcher);
-            
+
             // Try to find schema for the current file in the FULL catalog
             if let Some(entry) = SchemaFetcher::find_schema_url(&catalog, match_target) {
                 let url = entry.url.clone();
@@ -423,7 +441,8 @@ async fn fetch_schema_with_logic(
                     }
                     Err(e) => {
                         let mut s = state.lock().await;
-                        s.schema_state = SchemaState::Error(format!("Schema download error: {}", e));
+                        s.schema_state =
+                            SchemaState::Error(format!("Schema download error: {}", e));
                     }
                 }
             } else {
@@ -432,7 +451,9 @@ async fn fetch_schema_with_logic(
             }
 
             // Optional: Background pre-fetch other relevant schemas in the same directory
-            let project_root = std::path::Path::new(&fname).parent().unwrap_or(std::path::Path::new("."));
+            let project_root = std::path::Path::new(&fname)
+                .parent()
+                .unwrap_or(std::path::Path::new("."));
             let relevant = SchemaFetcher::find_relevant_schemas(&catalog, project_root);
             for entry in relevant {
                 let f = Arc::clone(&fetcher_arc);

@@ -1,9 +1,9 @@
-use std::path::{Path, PathBuf};
-use std::fs;
-use std::time::{SystemTime, Duration};
-use std::sync::OnceLock;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+use std::time::{Duration, SystemTime};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -58,22 +58,19 @@ impl SchemaFetcher {
                 .expect("Failed to build reqwest client")
         });
 
-        Ok(Self {
-            cache_dir,
-            client,
-        })
+        Ok(Self { cache_dir, client })
     }
 
     pub async fn fetch_catalog(&self) -> Result<SchemaCatalog, SchemaError> {
         let catalog_path = self.cache_dir.join("catalog.json");
-        
+
         if let Some(catalog) = self.read_cache::<SchemaCatalog>(&catalog_path)? {
             return Ok(catalog);
         }
 
         let url = "https://www.schemastore.org/api/json/catalog.json";
         let catalog: SchemaCatalog = self.client.get(url).send().await?.json().await?;
-        
+
         self.write_cache(&catalog_path, &catalog)?;
         Ok(catalog)
     }
@@ -83,12 +80,18 @@ impl SchemaFetcher {
             return Err(SchemaError::Cache("Empty schema URL provided".to_string()));
         }
         if !url.starts_with("http://") && !url.starts_with("https://") {
-            return Err(SchemaError::Cache(format!("Invalid schema URL (must be absolute): {}", url)));
+            return Err(SchemaError::Cache(format!(
+                "Invalid schema URL (must be absolute): {}",
+                url
+            )));
         }
 
         // Use hash of URL as filename for caching
         let hash = format!("{:x}", md5::compute(url));
-        let schema_path = self.cache_dir.join("schemas").join(format!("{}.json", hash));
+        let schema_path = self
+            .cache_dir
+            .join("schemas")
+            .join(format!("{}.json", hash));
 
         if let Some(schema) = self.read_cache::<Value>(&schema_path)? {
             return Ok(schema);
@@ -99,14 +102,19 @@ impl SchemaFetcher {
         Ok(schema)
     }
 
-    fn read_cache<T: for<'de> Deserialize<'de>>(&self, path: &Path) -> Result<Option<T>, SchemaError> {
+    fn read_cache<T: for<'de> Deserialize<'de>>(
+        &self,
+        path: &Path,
+    ) -> Result<Option<T>, SchemaError> {
         if !path.exists() {
             return Ok(None);
         }
 
         let metadata = fs::metadata(path)?;
         let modified = metadata.modified()?;
-        let elapsed = SystemTime::now().duration_since(modified).unwrap_or(Duration::from_secs(0));
+        let elapsed = SystemTime::now()
+            .duration_since(modified)
+            .unwrap_or(Duration::from_secs(0));
 
         if elapsed > Duration::from_secs(30 * 24 * 60 * 60) {
             return Ok(None);
@@ -241,11 +249,11 @@ pub fn match_glob(pattern: &str, target: &str) -> bool {
                 // Pattern is like "**/cassettes/*.json"
                 let target_parts: Vec<&str> = target.split('/').collect();
                 let suffix_parts: Vec<&str> = suffix.split('/').collect();
-                
+
                 if target_parts.len() < suffix_parts.len() {
                     return false;
                 }
-                
+
                 let target_tail = &target_parts[target_parts.len() - suffix_parts.len()..];
                 for (p, t) in suffix_parts.iter().zip(target_tail.iter()) {
                     if !match_filename_glob(p, t) {
@@ -255,15 +263,15 @@ pub fn match_glob(pattern: &str, target: &str) -> bool {
                 return true;
             }
         }
-        
+
         // Exact path match (could be improved to handle intermediate wildcards)
         let pattern_parts: Vec<&str> = pattern.split('/').collect();
         let target_parts: Vec<&str> = target.split('/').collect();
-        
+
         if pattern_parts.len() != target_parts.len() {
             return false;
         }
-        
+
         for (p, t) in pattern_parts.iter().zip(target_parts.iter()) {
             if !match_filename_glob(p, t) {
                 return false;
@@ -281,13 +289,13 @@ fn match_filename_glob(pattern: &str, target: &str) -> bool {
     if pattern == target || pattern == "*" || pattern == "**" {
         return true;
     }
-    
+
     if !pattern.contains('*') {
         return pattern == target;
     }
 
     let parts: Vec<&str> = pattern.split('*').collect();
-    
+
     // Check start and end
     if !pattern.starts_with('*') && !target.starts_with(parts[0]) {
         return false;
@@ -323,19 +331,22 @@ mod tests {
         assert!(match_glob("*.docker-compose.yml", "my.docker-compose.yml"));
         assert!(match_glob(".*rc", ".eslintrc"));
         assert!(match_glob("config.*.json", "config.dev.json"));
-        
+
         // Path handling
         assert!(match_glob("**/skill.json", "skill.json"));
         assert!(match_glob("**/skill.json", "dir/skill.json"));
         assert!(match_glob("**/cassettes/*.json", "cassettes/test.json"));
-        assert!(match_glob("**/cassettes/*.json", "project/cassettes/test.json"));
-        
+        assert!(match_glob(
+            "**/cassettes/*.json",
+            "project/cassettes/test.json"
+        ));
+
         // Negative matches
         assert!(!match_glob("package.json", "package.js"));
         assert!(!match_glob("*.json", "test.yaml"));
         assert!(!match_glob("**/cassettes/*.json", "tsconfig.json"));
         assert!(!match_glob("**/cassettes/*.json", "dir/tsconfig.json"));
-        
+
         // tsconfig case
         assert!(match_glob("tsconfig*.json", "tsconfig.json"));
         assert!(match_glob("tsconfig*.json", "tsconfig.release.json"));
@@ -367,9 +378,12 @@ mod tests {
                 SchemaEntry {
                     name: "compose.yml".to_string(),
                     description: None,
-                    file_match: Some(vec!["**/compose.yml".to_string(), "**/docker-compose.yml".to_string()]),
+                    file_match: Some(vec![
+                        "**/compose.yml".to_string(),
+                        "**/docker-compose.yml".to_string(),
+                    ]),
                     url: "https://example.com/compose.json".to_string(),
-                }
+                },
             ],
         };
 
@@ -386,8 +400,8 @@ mod tests {
         assert_eq!(matched_compose.name, "compose.yml");
 
         // Heuristic: tsconfig.dev.json should match tsconfig.json
-        let matched_tsconfig = SchemaFetcher::find_schema_url(&catalog, "tsconfig.dev.json").unwrap();
+        let matched_tsconfig =
+            SchemaFetcher::find_schema_url(&catalog, "tsconfig.dev.json").unwrap();
         assert_eq!(matched_tsconfig.name, "tsconfig.json");
     }
 }
-

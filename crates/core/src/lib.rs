@@ -1,25 +1,25 @@
-pub mod state;
+pub mod action;
+pub mod edit;
 pub mod flatten;
+pub mod format;
 pub mod navigate;
 pub mod render;
-pub mod edit;
+pub mod state;
 pub mod theme;
-pub mod format;
-pub mod action;
 
 #[cfg(feature = "schema")]
-pub mod schema;
-#[cfg(feature = "schema")]
 pub mod config;
+#[cfg(feature = "schema")]
+pub mod schema;
 
 // Prelude
 pub mod prelude {
-    pub use crate::state::{EditorState, UiNode, NodeType, EditMode, SchemaState};
     pub use crate::action::Action;
-    pub use crate::format::Format;
-    pub use crate::theme::Theme;
-    pub use crate::render::SchemaEditor;
-    pub use crate::navigate;
     #[cfg(feature = "schema")]
     pub use crate::config::CliseConfig;
+    pub use crate::format::Format;
+    pub use crate::navigate;
+    pub use crate::render::SchemaEditor;
+    pub use crate::state::{EditMode, EditorState, NodeType, SchemaState, UiNode};
+    pub use crate::theme::Theme;
 }

@@ -1,5 +1,5 @@
-use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct SchemaMapping {
@@ -21,7 +21,9 @@ impl CliseConfig {
         if config_path.exists() {
             let content = std::fs::read_to_string(&config_path).unwrap_or_default();
             if let Ok(mappings) = serde_json::from_str::<Vec<SchemaMapping>>(&content) {
-                return Self { schema_mappings: mappings };
+                return Self {
+                    schema_mappings: mappings,
+                };
             }
             if let Ok(config) = serde_json::from_str::<CliseConfig>(&content) {
                 return config;
@@ -38,7 +40,8 @@ impl CliseConfig {
         if let Some(parent) = config_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let content = serde_json::to_string_pretty(&self.schema_mappings).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        let content = serde_json::to_string_pretty(&self.schema_mappings)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
         std::fs::write(config_path, content)
     }
 
@@ -54,18 +57,24 @@ impl CliseConfig {
             existing.name = name;
             existing.downloaded = downloaded;
         } else {
-            self.schema_mappings.push(SchemaMapping { file, url, name, downloaded });
+            self.schema_mappings.push(SchemaMapping {
+                file,
+                url,
+                name,
+                downloaded,
+            });
         }
     }
-    
+
     pub fn get_mapping(&self, file: &str) -> Option<SchemaMapping> {
         // First pass: exact match
         if let Some(m) = self.schema_mappings.iter().find(|m| m.file == file) {
             return Some(m.clone());
         }
-        
+
         // Second pass: glob match
-        self.schema_mappings.iter()
+        self.schema_mappings
+            .iter()
             .find(|m| crate::schema::match_glob(&m.file, file))
             .cloned()
     }
