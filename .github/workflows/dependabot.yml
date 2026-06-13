@@ -1,0 +1,30 @@
+name: Dependabot Updates
+
+on:
+  pull_request:
+    branches: [ "master", "main" ]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  dependabot-test:
+    name: Dependabot Build and Test
+    if: ${{ github.actor == 'dependabot[bot]' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: Run Cargo Test
+        run: cargo test --workspace --all-targets
