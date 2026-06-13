@@ -32,38 +32,34 @@ fn start_edit_impl(state: &mut EditorState, clear_value: bool) {
 
     // Special handling for Boolean
     let is_bool = current_value.as_bool();
-    if let Some(b) = is_bool {
-        if !clear_value {
-            state.save_to_undo();
-            let new_value = Value::Bool(!b);
-            if let Some(v) = state.data.pointer_mut(&pointer) {
-                *v = new_value;
-            }
-            state.edit_mode = EditMode::Normal;
-            state.rebuild_flattened();
-            return;
+    if let Some(b) = is_bool.filter(|_| !clear_value) {
+        state.save_to_undo();
+        let new_value = Value::Bool(!b);
+        if let Some(v) = state.data.pointer_mut(&pointer) {
+            *v = new_value;
         }
+        state.edit_mode = EditMode::Normal;
+        state.rebuild_flattened();
+        return;
     }
 
     // Check schema for enum
-    if let Some(schema) = &state.schema {
-        if let Some(sub_schema) = find_sub_schema(schema, &path) {
-            if let Some(enum_values) = sub_schema.get("enum").and_then(|v| v.as_array()) {
-                let options: Vec<String> = enum_values
-                    .iter()
-                    .map(|v| v.as_str().unwrap_or(&v.to_string()).to_string())
-                    .collect();
+    if let Some(sub_schema) = state.schema.as_ref().and_then(|s| find_sub_schema(s, &path)) {
+        if let Some(enum_values) = sub_schema.get("enum").and_then(|v| v.as_array()) {
+            let options: Vec<String> = enum_values
+                .iter()
+                .map(|v| v.as_str().unwrap_or(&v.to_string()).to_string())
+                .collect();
 
-                let selected = options
-                    .iter()
-                    .position(|opt| {
-                        opt == &current_value.as_str().unwrap_or(&current_value.to_string())
-                    })
-                    .unwrap_or(0);
+            let selected = options
+                .iter()
+                .position(|opt| {
+                    opt == &current_value.as_str().unwrap_or(&current_value.to_string())
+                })
+                .unwrap_or(0);
 
-                state.edit_mode = EditMode::Dropdown { options, selected };
-                return;
-            }
+            state.edit_mode = EditMode::Dropdown { options, selected };
+            return;
         }
     }
 

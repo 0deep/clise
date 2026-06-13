@@ -1,3 +1,18 @@
+#![allow(clippy::too_many_arguments)]
+#![allow(clippy::collapsible_if)]
+#![allow(clippy::collapsible_match)]
+#![allow(clippy::manual_strip)]
+#![allow(clippy::needless_borrow)]
+#![allow(clippy::double_ended_iterator_last)]
+#![allow(clippy::manual_map)]
+#![allow(clippy::needless_range_loop)]
+#![allow(clippy::manual_checked_ops)]
+#![allow(clippy::manual_div_ceil)]
+#![allow(clippy::op_ref)]
+#![allow(clippy::len_zero)]
+#![allow(clippy::redundant_pattern_matching)]
+#![allow(clippy::single_match)]
+
 pub mod action;
 pub mod edit;
 pub mod flatten;

@@ -157,7 +157,7 @@ impl SchemaFetcher {
         }
 
         // Third pass (Heuristic fallback): Try suffix matching for '-' or '_'
-        if let Some(last_sep_idx) = filename.rfind(|c| c == '-' || c == '_') {
+        if let Some(last_sep_idx) = filename.rfind(['-', '_']) {
             let suffix_variant = &filename[last_sep_idx + 1..];
             if !suffix_variant.is_empty() && suffix_variant != filename {
                 for entry in &catalog.schemas {
@@ -202,11 +202,10 @@ impl SchemaFetcher {
 
         let mut files = Vec::new();
         for entry in entries.flatten() {
-            if let Ok(file_type) = entry.file_type() {
-                if file_type.is_file() {
-                    if let Some(name) = entry.file_name().to_str() {
-                        files.push(name.to_string());
-                    }
+            if entry.file_type().is_ok_and(|ft| ft.is_file()) {
+                let name_opt = entry.file_name().to_str().map(|s| s.to_string());
+                if let Some(name) = name_opt {
+                    files.push(name);
                 }
             }
         }
@@ -239,11 +238,10 @@ pub fn match_glob(pattern: &str, target: &str) -> bool {
 
     // If pattern has path segments, target must also match the path structure.
     if pattern.contains('/') {
-        if pattern.starts_with("**/") {
-            let suffix = &pattern[3..];
+        if let Some(suffix) = pattern.strip_prefix("**/") {
             if !suffix.contains('/') {
                 // Pattern is like "**/filename.json" or "**/tsconfig*.json"
-                let target_filename = target.split('/').last().unwrap_or(&target);
+                let target_filename = target.split('/').next_back().unwrap_or(&target);
                 return match_filename_glob(suffix, target_filename);
             } else {
                 // Pattern is like "**/cassettes/*.json"
@@ -281,7 +279,7 @@ pub fn match_glob(pattern: &str, target: &str) -> bool {
     }
 
     // No path segments in pattern: match against filename only
-    let target_filename = target.split('/').last().unwrap_or(&target);
+    let target_filename = target.split('/').next_back().unwrap_or(&target);
     match_filename_glob(&pattern, target_filename)
 }
 

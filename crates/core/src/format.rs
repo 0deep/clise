@@ -2464,7 +2464,8 @@ app:
             .pointer_mut("/services")
             .and_then(|v| v.as_object_mut())
         {
-            if let Some(web_val) = services.remove("web") {
+            let web_val = services.remove("web");
+            if let Some(web_val) = web_val {
                 services.insert("web_service".to_string(), web_val);
             }
         }
@@ -2500,7 +2501,8 @@ app:
         let mut value_jsonc = parse(original_jsonc, Format::Jsonc).unwrap();
         // Rename "web" to "web_service"
         if let Some(obj) = value_jsonc.as_object_mut() {
-            if let Some(web_val) = obj.remove("web") {
+            let web_val = obj.remove("web");
+            if let Some(web_val) = web_val {
                 obj.insert("web_service".to_string(), web_val);
             }
         }
@@ -2535,7 +2537,8 @@ image = "nginx" # nginx image
         let mut value_toml = parse(original_toml, Format::Toml).unwrap();
         // Rename "web" to "web_service"
         if let Some(obj) = value_toml.as_object_mut() {
-            if let Some(web_val) = obj.remove("web") {
+            let web_val = obj.remove("web");
+            if let Some(web_val) = web_val {
                 obj.insert("web_service".to_string(), web_val);
             }
         }

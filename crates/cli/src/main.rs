@@ -1,3 +1,7 @@
+#![allow(clippy::needless_borrow)]
+#![allow(clippy::double_ended_iterator_last)]
+#![allow(clippy::bool_assert_comparison)]
+
 mod commands;
 
 use clise_core::prelude::*;

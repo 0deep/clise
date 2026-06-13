@@ -444,15 +444,16 @@ impl EditorState {
             if parent.is_null() {
                 let mut initialized = false;
                 if let Some(schema) = &self.schema {
-                    if let Some(sub) = crate::edit::find_sub_schema(schema, parent_path) {
-                        if let Some(t) = sub.get("type").and_then(|v| v.as_str()) {
-                            if t == "array" {
-                                *parent = Value::Array(Vec::new());
-                                initialized = true;
-                            } else if t == "object" {
-                                *parent = Value::Object(serde_json::Map::new());
-                                initialized = true;
-                            }
+                    if let Some(t) = crate::edit::find_sub_schema(schema, parent_path)
+                        .and_then(|sub| sub.get("type"))
+                        .and_then(|v| v.as_str())
+                    {
+                        if t == "array" {
+                            *parent = Value::Array(Vec::new());
+                            initialized = true;
+                        } else if t == "object" {
+                            *parent = Value::Object(serde_json::Map::new());
+                            initialized = true;
                         }
                     }
                 }
@@ -522,17 +523,13 @@ impl EditorState {
         if let Some(parent) = self.data.pointer(&parent_pointer) {
             match parent {
                 Value::Array(_) => {
-                    if let Ok(idx) = child_key.parse::<usize>() {
-                        if idx > 0 {
-                            can_move = true;
-                        }
+                    if child_key.parse::<usize>().is_ok_and(|idx| idx > 0) {
+                        can_move = true;
                     }
                 }
                 Value::Object(map) => {
-                    if let Some(idx) = map.keys().position(|k| k == child_key) {
-                        if idx > 0 {
-                            can_move = true;
-                        }
+                    if map.keys().position(|k| k == child_key).is_some_and(|idx| idx > 0) {
+                        can_move = true;
                     }
                 }
                 _ => {}
@@ -589,17 +586,13 @@ impl EditorState {
         if let Some(parent) = self.data.pointer(&parent_pointer) {
             match parent {
                 Value::Array(arr) => {
-                    if let Ok(idx) = child_key.parse::<usize>() {
-                        if idx + 1 < arr.len() {
-                            can_move = true;
-                        }
+                    if child_key.parse::<usize>().is_ok_and(|idx| idx + 1 < arr.len()) {
+                        can_move = true;
                     }
                 }
                 Value::Object(map) => {
-                    if let Some(idx) = map.keys().position(|k| k == child_key) {
-                        if idx + 1 < map.len() {
-                            can_move = true;
-                        }
+                    if map.keys().position(|k| k == child_key).is_some_and(|idx| idx + 1 < map.len()) {
+                        can_move = true;
                     }
                 }
                 _ => {}
@@ -1271,10 +1264,8 @@ impl EditorState {
                             *cursor_pos -= 1;
                         }
                     }
-                    KeyCode::Right => {
-                        if *cursor_pos < buffer.chars().count() {
-                            *cursor_pos += 1;
-                        }
+                    KeyCode::Right if *cursor_pos < buffer.chars().count() => {
+                        *cursor_pos += 1;
                     }
                     _ => {}
                 }
@@ -1346,8 +1337,7 @@ impl EditorState {
                                 return Action::Noop;
                             }
                             // Transition from TextPrompt to RenameKeyPrompt when buffer is empty
-                            if let Some(node) = self.selected_node().cloned() {
-                                if node.path.len() > 0 {
+                            if let Some(node) = self.selected_node().cloned().filter(|n| !n.path.is_empty()) {
                                     let mut parent_path = node.path.clone();
                                     let original_key = parent_path.pop().unwrap();
 
@@ -1382,7 +1372,6 @@ impl EditorState {
                                             value: current_value,
                                         };
                                     }
-                                }
                             }
                         }
                     }
@@ -1391,10 +1380,8 @@ impl EditorState {
                             *cursor_pos -= 1;
                         }
                     }
-                    KeyCode::Right => {
-                        if *cursor_pos < buffer.chars().count() {
-                            *cursor_pos += 1;
-                        }
+                    KeyCode::Right if *cursor_pos < buffer.chars().count() => {
+                        *cursor_pos += 1;
                     }
                     _ => {}
                 }
@@ -1405,15 +1392,11 @@ impl EditorState {
             } => match event.code {
                 KeyCode::Enter => crate::edit::apply_edit(self),
                 KeyCode::Esc => crate::edit::cancel_edit(self),
-                KeyCode::Up => {
-                    if *selected > 0 {
-                        *selected -= 1;
-                    }
+                KeyCode::Up if *selected > 0 => {
+                    *selected -= 1;
                 }
-                KeyCode::Down => {
-                    if *selected + 1 < options.len() {
-                        *selected += 1;
-                    }
+                KeyCode::Down if *selected + 1 < options.len() => {
+                    *selected += 1;
                 }
                 _ => {}
             },
@@ -1676,7 +1659,7 @@ mod tests {
 
         // 1. Execute trigger_add_child (creates temp node and calls save_to_undo)
         crate::edit::trigger_add_child(&mut state);
-        assert!(state.undo_stack.len() > 0);
+        assert!(!state.undo_stack.is_empty());
 
         // 2. Execute cancel_edit (removes temp node and calls pop_undo)
         crate::edit::cancel_edit(&mut state);
