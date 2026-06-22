@@ -126,7 +126,7 @@ if [ -z "$LATEST_RELEASE" ]; then
 fi
 
 if [ -z "$LATEST_RELEASE" ]; then
-    LATEST_RELEASE="v0.1.0"
+    LATEST_RELEASE="v0.1.1"
     echo "⚠️ Could not fetch latest release automatically. Falling back to $LATEST_RELEASE"
 fi
 

@@ -38,10 +38,10 @@ Install `clisé` using the installation script via `curl` or `wget`:
 This installs `clise` to `$HOME/.local/bin` without requiring root privileges:
 
 ```bash
-curl -o- https://raw.githubusercontent.com/0deep/clise/v0.1.0/install.sh | bash
+curl -o- https://raw.githubusercontent.com/0deep/clise/v0.1.1/install.sh | bash
 ```
 ```bash
-wget -qO- https://raw.githubusercontent.com/0deep/clise/v0.1.0/install.sh | bash
+wget -qO- https://raw.githubusercontent.com/0deep/clise/v0.1.1/install.sh | bash
 ```
 
 > [!NOTE]
@@ -51,10 +51,10 @@ wget -qO- https://raw.githubusercontent.com/0deep/clise/v0.1.0/install.sh | bash
 If you need to run `clise` with root privileges (`sudo clise`) or want to install it system-wide for all users, run the installer with `sudo`. It will automatically detect root privileges and install to `/usr/local/bin`:
 
 ```bash
-curl -o- https://raw.githubusercontent.com/0deep/clise/v0.1.0/install.sh | sudo bash
+curl -o- https://raw.githubusercontent.com/0deep/clise/v0.1.1/install.sh | sudo bash
 ```
 ```bash
-wget -qO- https://raw.githubusercontent.com/0deep/clise/v0.1.0/install.sh | sudo bash
+wget -qO- https://raw.githubusercontent.com/0deep/clise/v0.1.1/install.sh | sudo bash
 ```
 
 ---

@@ -14,7 +14,7 @@ Core library crate for parsing, formatting, editing, and validating structured d
 Add this to your `Cargo.toml`:
 ```toml
 [dependencies]
-clise = "0.1.0"
+clise = "0.1.1"
 serde_json = "1.0"
 ```
 

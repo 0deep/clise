@@ -1302,7 +1302,7 @@ fn serialize_leaf_yaml(val: &Value) -> String {
         }
         Value::Number(n) => n.to_string(),
         Value::Bool(b) => b.to_string(),
-        Value::Null => "null".to_string(),
+        Value::Null => "".to_string(),
         _ => "".to_string(),
     }
 }
@@ -2648,6 +2648,7 @@ services:
             serialize_leaf_yaml(&Value::String("45.6".to_string())),
             "\"45.6\""
         );
+        assert_eq!(serialize_leaf_yaml(&Value::Null), "");
     }
 
     #[test]
