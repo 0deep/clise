@@ -10,7 +10,15 @@ set -e
 OWNER="0deep"  # Replace with actual GitHub owner
 REPO="clise"
 BINARY_NAME="clise"
-INSTALL_DIR="$HOME/.local/bin"
+
+if [ -z "${INSTALL_DIR-}" ]; then
+    if [ "$(id -u)" -eq 0 ]; then
+        INSTALL_DIR="/usr/local/bin"
+    else
+        INSTALL_DIR="$HOME/.local/bin"
+    fi
+fi
+
 COMP_DIR_BASH="$HOME/.local/share/bash-completion/completions"
 COMP_DIR_ZSH="$HOME/.zsh/completion"
 
@@ -185,28 +193,30 @@ case "$CURRENT_SHELL" in
 esac
 
 # 6. Path check and final instructions
-USER_PROFILE=$(clise_detect_profile)
-PATH_STR="export PATH=\"\$PATH:$INSTALL_DIR\""
+if [ "$INSTALL_DIR" != "/usr/local/bin" ] && [ "$INSTALL_DIR" != "/usr/bin" ]; then
+    USER_PROFILE=$(clise_detect_profile)
+    PATH_STR="export PATH=\"\$PATH:$INSTALL_DIR\""
 
-case :$PATH: in
-    *:$INSTALL_DIR:*) ;;
-    *)
-        if [ -n "$USER_PROFILE" ]; then
-            if ! grep -qc "$INSTALL_DIR" "$USER_PROFILE" 2>/dev/null; then
-                echo "=> Appending PATH configuration to $USER_PROFILE"
-                echo "" >> "$USER_PROFILE"
-                echo "# clise path configuration" >> "$USER_PROFILE"
-                echo "$PATH_STR" >> "$USER_PROFILE"
+    case :$PATH: in
+        *:$INSTALL_DIR:*) ;;
+        *)
+            if [ -n "$USER_PROFILE" ]; then
+                if ! grep -qc "$INSTALL_DIR" "$USER_PROFILE" 2>/dev/null; then
+                    echo "=> Appending PATH configuration to $USER_PROFILE"
+                    echo "" >> "$USER_PROFILE"
+                    echo "# clise path configuration" >> "$USER_PROFILE"
+                    echo "$PATH_STR" >> "$USER_PROFILE"
+                else
+                    echo "=> clise PATH configuration already in $USER_PROFILE"
+                fi
             else
-                echo "=> clise PATH configuration already in $USER_PROFILE"
+                echo "⚠️  WARNING: $INSTALL_DIR is not in your PATH."
+                echo "   Please add the following line to your shell configuration (~/.bashrc or ~/.zshrc):"
+                echo "   $PATH_STR"
             fi
-        else
-            echo "⚠️  WARNING: $INSTALL_DIR is not in your PATH."
-            echo "   Please add the following line to your shell configuration (~/.bashrc or ~/.zshrc):"
-            echo "   $PATH_STR"
-        fi
-        ;;
-esac
+            ;;
+    esac
+fi
 
 echo "🎉 Installation completed successfully!"
 
