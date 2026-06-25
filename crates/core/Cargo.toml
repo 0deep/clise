@@ -49,10 +49,11 @@ schema = [
 [package]
 edition = "2024"
 name = "clise"
-version = "0.2.0"
+version = "0.2.1"
 license = "MIT"
 description = "Core library for clise CLI/TUI utility"
 readme = "README.md"
+repository = "https://github.com/0deep/clise"
 
 [dev-dependencies]
 tokio = { version = "=1.52.3", features = ["full"] }

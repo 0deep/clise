@@ -280,8 +280,9 @@ fn render_list(
                         .saturating_sub(node_x)
                         .saturating_sub(2)
                         .clamp(20, 60);
-                    let tip_lines = wrap_text(&desc, max_tip_width as usize).len() as u16;
-                    selected_lines += tip_lines + 2;
+                    let tip_lines = wrap_text(&desc, max_tip_width as usize).len();
+                    let display_lines = tip_lines.min(8);
+                    selected_lines += (display_lines + 2) as u16;
                 }
             }
         }
@@ -880,15 +881,21 @@ fn render_list(
                     if let Some(schema) = &state.schema {
                         if let Some(sub) = find_sub_schema(schema, &node.path) {
                             if let Some(desc) = extract_description(sub) {
-                                render_description_tooltip(
+                                let max_tip_width = area
+                                    .right()
+                                    .saturating_sub(x)
+                                    .saturating_sub(2)
+                                    .clamp(20, 60);
+                                render_tooltip(
                                     area,
                                     buf,
-                                    y,
-                                    node_h,
                                     x,
+                                    y + node_h,
+                                    max_tip_width,
                                     &desc,
                                     theme,
                                     selected_render_bg,
+                                    state,
                                 );
                             }
                         }
@@ -911,6 +918,7 @@ fn render_list(
             scroll_offset,
             &filter_buffer,
             theme,
+            state,
         );
         state.dropdown_visible_items = visible;
     }
@@ -927,6 +935,7 @@ fn render_dropdown(
     scroll_offset: usize,
     _filter_buffer: &str,
     theme: &Theme,
+    state: &EditorState,
 ) -> usize {
     if options.is_empty() {
         return 0;
@@ -967,14 +976,16 @@ fn render_dropdown(
 
     for (i, opt) in options[start..end].iter().enumerate() {
         let opt_y = popup_y + 1 + i as u16;
-        let actual_index = start + i;
-        let style = if actual_index == selected {
-            theme.focused_style
-        } else {
-            Style::default()
-        };
-        let opt_width = (width.saturating_sub(4)) as usize;
-        set_string_and_clear(buf, popup_x + 2, opt_y, opt, opt_width, style);
+        if opt_y < area.bottom() && opt_y < buf.area.bottom() {
+            let actual_index = start + i;
+            let style = if actual_index == selected {
+                theme.focused_style
+            } else {
+                Style::default()
+            };
+            let opt_width = (width.saturating_sub(4)) as usize;
+            set_string_and_clear(buf, popup_x + 2, opt_y, opt, opt_width, style);
+        }
     }
 
     // Render scrollbar if needed
@@ -989,17 +1000,19 @@ fn render_dropdown(
         };
         for i in 0..scrollbar_height {
             let sy = popup_y + 1 + i;
-            let ch = if i == thumb_position { "█" } else { "│" };
-            buf.set_string(scrollbar_x, sy, ch, theme.bracket_style);
+            if sy < area.bottom() && sy < buf.area.bottom() {
+                let ch = if i == thumb_position { "█" } else { "│" };
+                buf.set_string(scrollbar_x, sy, ch, theme.bracket_style);
+            }
         }
     }
 
-    // Render description tooltip for the selected item
+    // Render description tooltip for the selected item using render_tooltip
     if let Some(desc) = descriptions.get(selected).and_then(|d| d.as_ref()) {
         if !desc.is_empty() {
             // Position tooltip to the right of the dropdown
             let mut tip_x = popup_area.right() + 1;
-            let max_tip_width = area.right().saturating_sub(tip_x);
+            let mut max_tip_width = area.right().saturating_sub(tip_x);
             if max_tip_width < 10 {
                 // No space on right — try left of dropdown
                 tip_x = popup_area.x.saturating_sub(10);
@@ -1009,40 +1022,22 @@ fn render_dropdown(
                     tip_x = popup_area.right() + 1;
                 }
             }
-            let max_tip_width = area.right().saturating_sub(tip_x);
-            if max_tip_width < 5 || tip_x >= area.right() {
-                return visible_items;
-            }
+            max_tip_width = area.right().saturating_sub(tip_x);
+            if max_tip_width >= 5 && tip_x < area.right() {
+                // Vertical: align with the selected item row
+                let sel_row = selected.saturating_sub(scroll_offset) as u16;
+                let tip_y = popup_y + 1 + sel_row;
 
-            let lines = wrap_text(desc, max_tip_width as usize);
-            let desc_style = Style::default().fg(Color::Rgb(108, 112, 134));
-
-            let tip_height = lines.len() as u16;
-            let tip_actual_width = lines
-                .iter()
-                .map(|l| unicode_width::UnicodeWidthStr::width(l.as_str()))
-                .max()
-                .unwrap_or(0) as u16
-                + 2; // 1 padding each side
-
-            // Vertical: align with the selected item row
-            let sel_row = selected.saturating_sub(scroll_offset) as u16;
-            let mut tip_y = popup_y + 1 + sel_row;
-            if tip_y + tip_height > area.bottom() {
-                tip_y = area.bottom().saturating_sub(tip_height);
-            }
-
-            let tip_area = Rect::new(tip_x, tip_y, tip_actual_width, tip_height);
-            ratatui::widgets::Clear.render(tip_area, buf);
-
-            for (i, line) in lines.iter().enumerate() {
-                set_string_and_clear(
+                render_tooltip(
+                    area,
                     buf,
-                    tip_x + 1,
-                    tip_y + i as u16,
-                    line,
-                    tip_actual_width.saturating_sub(2) as usize,
-                    desc_style,
+                    tip_x,
+                    tip_y,
+                    max_tip_width.clamp(20, 60),
+                    desc,
+                    theme,
+                    None,
+                    state,
                 );
             }
         }
@@ -1051,15 +1046,16 @@ fn render_dropdown(
     visible_items
 }
 
-fn render_description_tooltip(
+fn render_tooltip(
     area: Rect,
     buf: &mut Buffer,
-    node_y: u16,
-    node_height: u16,
-    node_x: u16,
+    x: u16,
+    y: u16,
+    max_tip_width: u16,
     desc: &str,
     theme: &Theme,
     item_bg: Option<Color>,
+    state: &EditorState,
 ) {
     let desc_style = Style::default().fg(Color::Rgb(108, 112, 134)); // Overlay1
     let mut desc_style = desc_style;
@@ -1067,49 +1063,98 @@ fn render_description_tooltip(
         desc_style = desc_style.bg(bg);
     }
 
-    // 사용 가능한 최대 너비
-    let max_text_width = area
-        .right()
-        .saturating_sub(node_x)
-        .saturating_sub(2)
-        .clamp(20, 60);
-
-    // 텍스트 래핑
-    let lines = wrap_text(desc, max_text_width as usize);
+    // Text wrapping
+    let lines = wrap_text(desc, max_tip_width as usize);
     if lines.is_empty() {
         return;
     }
-    let text_height = lines.len() as u16;
-    let tip_height = text_height + 2; // +2 for borders
+
+    let total_lines = lines.len();
+    let max_tooltip_height = 8usize;
+    let scroll_limit = total_lines.saturating_sub(max_tooltip_height);
+    let t_scroll = state.tooltip_scroll_offset.min(scroll_limit);
+    let display_lines_count = total_lines.min(max_tooltip_height);
+
+    let tip_height = (display_lines_count + 2) as u16; // +2 for borders
 
     let text_width = lines
         .iter()
         .map(|l| unicode_width::UnicodeWidthStr::width(l.as_str()))
         .max()
         .unwrap_or(0) as u16;
-    let tip_width = text_width + 2; // +2 for borders
 
-    // 항상 아래쪽 배치
-    let tip_y = node_y + node_height;
-    if tip_y + tip_height > area.bottom() {
-        return; // 공간 부족
+    let has_scrollbar = total_lines > max_tooltip_height;
+    let scrollbar_width_offset = if has_scrollbar { 2 } else { 0 };
+    let tip_width = text_width + 2 + scrollbar_width_offset; // +2 for borders
+
+    // Clamp width to area width
+    let tip_width = tip_width.min(area.width);
+
+    // X clamping
+    let mut tip_x = x;
+    if tip_x + tip_width > area.right() {
+        tip_x = area.right().saturating_sub(tip_width);
+    }
+    if tip_x < area.x {
+        tip_x = area.x;
     }
 
-    let tip_area = Rect::new(node_x, tip_y, tip_width, tip_height);
+    // Y clamping
+    let mut tip_y = y;
+    if tip_y + tip_height > area.bottom() {
+        tip_y = area.bottom().saturating_sub(tip_height);
+    }
+    if tip_y < area.y {
+        tip_y = area.y;
+    }
+
+    let tip_area = Rect::new(tip_x, tip_y, tip_width, tip_height);
     ratatui::widgets::Clear.render(tip_area, buf);
 
     let mut border_style = theme.bracket_style;
     if let Some(bg) = item_bg {
         border_style = border_style.bg(bg);
     }
-    let block = Block::bordered().border_style(border_style);
+    let mut block = Block::bordered().border_style(border_style);
+    if has_scrollbar {
+        block = block.title(
+            Line::from(" ↕ PgUp/PgDn ")
+                .alignment(Alignment::Right)
+                .style(Style::default().fg(Color::Rgb(76, 79, 105))),
+        );
+    }
     block.render(tip_area, buf);
 
-    // 텍스트 렌더링
-    for (i, line) in lines.iter().enumerate() {
+    // Text rendering
+    let display_end = (t_scroll + display_lines_count).min(total_lines);
+    let display_lines = &lines[t_scroll..display_end];
+
+    for (i, line) in display_lines.iter().enumerate() {
         let line_y = tip_y + 1 + i as u16;
         if line_y < area.bottom() && line_y < buf.area.bottom() {
-            buf.set_string(node_x + 1, line_y, line, desc_style);
+            set_string_and_clear(
+                buf,
+                tip_x + 1,
+                line_y,
+                line,
+                (tip_width
+                    .saturating_sub(2)
+                    .saturating_sub(scrollbar_width_offset)) as usize,
+                desc_style,
+            );
+        }
+    }
+
+    // Scrollbar rendering
+    if has_scrollbar {
+        let scrollbar_x = tip_x + tip_width - 1;
+        let thumb_pos = (t_scroll * (display_lines_count - 1)) / scroll_limit;
+        for i in 0..display_lines_count {
+            let sy = tip_y + 1 + i as u16;
+            if sy < area.bottom() && sy < buf.area.bottom() {
+                let ch = if i == thumb_pos { "█" } else { "│" };
+                buf.set_string(scrollbar_x, sy, ch, border_style);
+            }
         }
     }
 }
@@ -1382,7 +1427,7 @@ fn format_type_name(t: &str) -> String {
     .to_string()
 }
 
-fn extract_description(sub_schema: &serde_json::Value) -> Option<String> {
+pub(crate) fn extract_description(sub_schema: &serde_json::Value) -> Option<String> {
     sub_schema
         .get("description")
         .and_then(|v| v.as_str())

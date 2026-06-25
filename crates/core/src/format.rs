@@ -1126,7 +1126,7 @@ fn assemble_block(
                     }
                 }
 
-                // key_order_changed가 false이고 level_order_changed도 false이면 원래 순서대로 조립
+                // If neither key_order_changed nor level_order_changed, assemble in original order
                 if !key_order_changed && !level_order_changed {
                     if let Some(orig_keys) = original_key_orders.get(parent_ptr) {
                         for k in orig_keys {
@@ -1175,7 +1175,7 @@ fn assemble_block(
                     }
                 }
 
-                // 새로 추가된 노드 또는 순서 변경이 켜졌을 때의 렌더링
+                // Render newly added nodes or when order change is triggered
                 for (k, v) in map {
                     if visited.contains(k) {
                         continue;

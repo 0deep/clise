@@ -224,7 +224,7 @@ pub struct EditorState {
     pub search_current_match_index: usize,
     /// Map of renamed keys: key is parent_pointer + "/" + new_key, value is original_key
     pub renamed_keys: std::collections::HashMap<String, String>,
-    /// 마우스 호버 중인 노드의 flattened index (None이면 호버 없음)
+    /// Flattened index of the node hovered by mouse (None if no hover)
     pub hovered_node: Option<usize>,
     /// Whether to scroll viewport to keep selected node visible
     pub scroll_to_selected: bool,
@@ -234,6 +234,8 @@ pub struct EditorState {
     pub(crate) all_nodes_cache: Vec<UiNode>,
     /// Last time backspace was pressed (to prevent accidental rename prompt)
     pub last_backspace_time: Option<std::time::Instant>,
+    /// Scroll offset of the active schema description tooltip
+    pub tooltip_scroll_offset: usize,
 }
 
 impl EditorState {
@@ -275,6 +277,7 @@ impl EditorState {
             dropdown_visible_items: 10,
             all_nodes_cache: Vec::new(),
             last_backspace_time: None,
+            tooltip_scroll_offset: 0,
         };
         state.rebuild_flattened();
         state
@@ -300,7 +303,7 @@ impl EditorState {
         let mut current_y: usize = 0;
         let mut idx = self.scroll_offset;
         while idx < self.flattened_nodes.len() {
-            let lines = 1; // 비편집 모드에서는 항상 1줄
+            let lines = 1; // Always 1 line in non-edit mode
             if y >= current_y && y < current_y + lines {
                 return Some(idx);
             }
@@ -1051,6 +1054,55 @@ impl EditorState {
         self.flattened_nodes.get(self.selected)
     }
 
+    pub fn is_tooltip_active(&self) -> bool {
+        match &self.edit_mode {
+            EditMode::Normal => {
+                if let Some(node) = self.selected_node() {
+                    if let Some(schema) = &self.schema {
+                        if let Some(sub) = crate::edit::find_sub_schema(schema, &node.path) {
+                            if let Some(desc) = crate::render::extract_description(sub) {
+                                return !desc.is_empty();
+                            }
+                        }
+                    }
+                }
+                false
+            }
+            EditMode::Dropdown {
+                descriptions,
+                selected,
+                ..
+            }
+            | EditMode::NewKeyDropdown {
+                descriptions,
+                selected,
+                ..
+            }
+            | EditMode::OneOfVariantDropdown {
+                descriptions,
+                selected,
+                ..
+            } => {
+                if let Some(Some(desc)) = descriptions.get(*selected) {
+                    !desc.is_empty()
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+    }
+
+    pub fn scroll_tooltip(&mut self, delta: isize) {
+        if delta < 0 {
+            self.tooltip_scroll_offset = self
+                .tooltip_scroll_offset
+                .saturating_sub(delta.unsigned_abs());
+        } else {
+            self.tooltip_scroll_offset = self.tooltip_scroll_offset.saturating_add(delta as usize);
+        }
+    }
+
     /// Get completion suggestions based on the current cursor node.
     pub fn get_completions_at_cursor(&self) -> Vec<CompletionItem> {
         if let Some(node) = self.selected_node() {
@@ -1306,13 +1358,42 @@ impl EditorState {
                         self.edit_mode = EditMode::Help;
                         return Action::Noop;
                     }
-                    KeyCode::Up => crate::navigate::move_up(self),
-                    KeyCode::Down => crate::navigate::move_down(self),
-                    KeyCode::PageUp => crate::navigate::page_up(self),
-                    KeyCode::PageDown => crate::navigate::page_down(self),
-                    KeyCode::Left => crate::navigate::collapse_current(self),
-                    KeyCode::Right => crate::navigate::expand_or_move_to_last_child(self),
-                    KeyCode::Char(' ') => crate::navigate::toggle_expand(self),
+                    KeyCode::Up => {
+                        self.tooltip_scroll_offset = 0;
+                        crate::navigate::move_up(self)
+                    }
+                    KeyCode::Down => {
+                        self.tooltip_scroll_offset = 0;
+                        crate::navigate::move_down(self)
+                    }
+                    KeyCode::PageUp => {
+                        if self.is_tooltip_active() {
+                            self.scroll_tooltip(-1);
+                            return Action::Noop;
+                        } else {
+                            crate::navigate::page_up(self)
+                        }
+                    }
+                    KeyCode::PageDown => {
+                        if self.is_tooltip_active() {
+                            self.scroll_tooltip(1);
+                            return Action::Noop;
+                        } else {
+                            crate::navigate::page_down(self)
+                        }
+                    }
+                    KeyCode::Left => {
+                        self.tooltip_scroll_offset = 0;
+                        crate::navigate::collapse_current(self)
+                    }
+                    KeyCode::Right => {
+                        self.tooltip_scroll_offset = 0;
+                        crate::navigate::expand_or_move_to_last_child(self)
+                    }
+                    KeyCode::Char(' ') => {
+                        self.tooltip_scroll_offset = 0;
+                        crate::navigate::toggle_expand(self)
+                    }
                     KeyCode::Enter => {
                         if let Some(node) = self.selected_node().cloned() {
                             match node.node_type {
@@ -1590,16 +1671,28 @@ impl EditorState {
                 }
                 KeyCode::Esc => crate::edit::cancel_edit(self),
                 KeyCode::Up if *selected > 0 => {
+                    self.tooltip_scroll_offset = 0;
                     *selected -= 1;
                     if *selected < *scroll_offset {
                         *scroll_offset = *selected;
                     }
                 }
                 KeyCode::Down if *selected + 1 < filtered_indices.len() => {
+                    self.tooltip_scroll_offset = 0;
                     *selected += 1;
                     let visible = self.dropdown_visible_items;
                     if visible > 0 && *selected >= *scroll_offset + visible {
                         *scroll_offset = *selected + 1 - visible;
+                    }
+                }
+                KeyCode::PageUp => {
+                    if self.is_tooltip_active() {
+                        self.scroll_tooltip(-1);
+                    }
+                }
+                KeyCode::PageDown => {
+                    if self.is_tooltip_active() {
+                        self.scroll_tooltip(1);
                     }
                 }
                 KeyCode::Char(c) => {
@@ -1654,16 +1747,28 @@ impl EditorState {
                 }
                 KeyCode::Esc => crate::edit::cancel_edit(self),
                 KeyCode::Up if *selected > 0 => {
+                    self.tooltip_scroll_offset = 0;
                     *selected -= 1;
                     if *selected < *scroll_offset {
                         *scroll_offset = *selected;
                     }
                 }
                 KeyCode::Down if *selected + 1 < filtered_indices.len() => {
+                    self.tooltip_scroll_offset = 0;
                     *selected += 1;
                     let visible = self.dropdown_visible_items;
                     if visible > 0 && *selected >= *scroll_offset + visible {
                         *scroll_offset = *selected + 1 - visible;
+                    }
+                }
+                KeyCode::PageUp => {
+                    if self.is_tooltip_active() {
+                        self.scroll_tooltip(-1);
+                    }
+                }
+                KeyCode::PageDown => {
+                    if self.is_tooltip_active() {
+                        self.scroll_tooltip(1);
                     }
                 }
                 KeyCode::Char(c) => {
@@ -1737,16 +1842,28 @@ impl EditorState {
                     self.edit_mode = EditMode::Normal;
                 }
                 KeyCode::Up if *selected > 0 => {
+                    self.tooltip_scroll_offset = 0;
                     *selected -= 1;
                     if *selected < *scroll_offset {
                         *scroll_offset = *selected;
                     }
                 }
                 KeyCode::Down if *selected + 1 < filtered_indices.len() => {
+                    self.tooltip_scroll_offset = 0;
                     *selected += 1;
                     let visible = self.dropdown_visible_items;
                     if visible > 0 && *selected >= *scroll_offset + visible {
                         *scroll_offset = *selected + 1 - visible;
+                    }
+                }
+                KeyCode::PageUp => {
+                    if self.is_tooltip_active() {
+                        self.scroll_tooltip(-1);
+                    }
+                }
+                KeyCode::PageDown => {
+                    if self.is_tooltip_active() {
+                        self.scroll_tooltip(1);
                     }
                 }
                 KeyCode::Char(c) => {
@@ -1858,6 +1975,51 @@ mod tests {
     use crate::format::Format;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use serde_json::json;
+
+    #[test]
+    fn test_tooltip_scroll_offset() {
+        let data = json!({ "key": "value" });
+        let mut state = EditorState::new(data, Format::Json, None, None);
+        assert_eq!(state.tooltip_scroll_offset, 0);
+
+        state.scroll_tooltip(1);
+        assert_eq!(state.tooltip_scroll_offset, 1);
+
+        state.scroll_tooltip(5);
+        assert_eq!(state.tooltip_scroll_offset, 6);
+
+        state.scroll_tooltip(-2);
+        assert_eq!(state.tooltip_scroll_offset, 4);
+
+        state.scroll_tooltip(-10);
+        assert_eq!(state.tooltip_scroll_offset, 0); // saturating
+
+        // Tooltip scroll keybind test (PageUp/PageDown)
+        // Should only work when tooltip is active
+        // Setup Dropdown mode
+        state.edit_mode = EditMode::Dropdown {
+            options: vec!["opt1".to_string()],
+            descriptions: vec![Some("Some description".to_string())],
+            selected: 0,
+            scroll_offset: 0,
+            filter_buffer: String::new(),
+            filtered_indices: vec![0],
+        };
+
+        assert!(state.is_tooltip_active());
+
+        // Scroll via PageDown
+        let page_down_event = KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE);
+        let action = state.handle_key_event(page_down_event);
+        assert!(matches!(action, crate::action::Action::Noop));
+        assert_eq!(state.tooltip_scroll_offset, 1);
+
+        // Scroll via PageUp
+        let page_up_event = KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE);
+        let action = state.handle_key_event(page_up_event);
+        assert!(matches!(action, crate::action::Action::Noop));
+        assert_eq!(state.tooltip_scroll_offset, 0);
+    }
 
     #[test]
     fn test_auto_adjust_expansion() {

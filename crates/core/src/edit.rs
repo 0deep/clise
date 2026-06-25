@@ -1142,7 +1142,7 @@ pub fn apply_edit(state: &mut EditorState) {
                     if let Value::Object(map) = parent {
                         // To preserve order (approximately), we might need to rebuild the map
                         // But for now, standard remove/insert is acceptable unless specific order preservation is requested
-                        // User mentioned: "(순서 보존을 위해 맵을 재구성합니다.)"
+                        // Rebuild the map to preserve key order
                         let mut new_map = serde_json::Map::new();
                         for (k, v) in map.iter() {
                             if k == &original_key {
@@ -1254,7 +1254,7 @@ pub fn apply_edit(state: &mut EditorState) {
                     _ => Value::Null,
                 }
             } else if has_quotes {
-                // 명시적으로 따옴표로 감싸서 입력한 경우 따옴표를 한 겹 벗겨내고 문자열로 취급
+                // Strip quotes and treat as string when explicitly quoted
                 let unquoted = &trimmed[1..trimmed.len() - 1];
                 Value::String(unquoted.to_string())
             } else if trimmed == "[]" {
@@ -1262,7 +1262,7 @@ pub fn apply_edit(state: &mut EditorState) {
             } else if trimmed == "{}" {
                 Value::Object(serde_json::Map::new())
             } else if is_string_target {
-                // 기존 값이 문자열이거나 스키마가 string을 요구하는 타겟일 때 문자열로 유지
+                // Keep as string when existing value is string or schema targets string type
                 Value::String(buffer.clone())
             } else if trimmed == "true" {
                 Value::Bool(true)
