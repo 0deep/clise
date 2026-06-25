@@ -25,6 +25,8 @@ impl<'a> StatefulWidget for SchemaEditor<'a> {
     type State = EditorState;
 
     fn render(self, area: Rect, buf: &mut Buffer, state: &mut Self::State) {
+        state.tooltip_area = None;
+        state.dropdown_area = None;
         let inner_area = match self.block {
             Some(b) => {
                 let inner = b.inner(area);
@@ -63,7 +65,9 @@ impl<'a> StatefulWidget for SchemaEditor<'a> {
                     .unwrap_or(true)
             };
 
-        render_list(list_area, buf, state, self.theme, show_cursor);
+        let (tip_area, dropdown_area) = render_list(list_area, buf, state, self.theme, show_cursor);
+        state.tooltip_area = tip_area;
+        state.dropdown_area = dropdown_area;
 
         // Render scrollbar if content exceeds viewport
         let total_nodes = state.flattened_nodes.len();
@@ -216,9 +220,9 @@ fn render_list(
     state: &mut EditorState,
     theme: &Theme,
     show_cursor: bool,
-) {
+) -> (Option<Rect>, Option<Rect>) {
     if state.flattened_nodes.is_empty() {
-        return;
+        return (None, None);
     }
 
     // 1. Calculate height of the selected node (for scrolling)
@@ -874,6 +878,7 @@ fn render_list(
         node_offset += 1;
     }
 
+    let mut active_tip = None;
     if let Some(y) = selected_render_y {
         if let Some(x) = selected_render_x {
             if let Some(node_h) = selected_render_height {
@@ -886,7 +891,7 @@ fn render_list(
                                     .saturating_sub(x)
                                     .saturating_sub(2)
                                     .clamp(20, 60);
-                                render_tooltip(
+                                let rect = render_tooltip(
                                     area,
                                     buf,
                                     x,
@@ -897,6 +902,7 @@ fn render_list(
                                     selected_render_bg,
                                     state,
                                 );
+                                active_tip = Some(rect);
                             }
                         }
                     }
@@ -905,9 +911,10 @@ fn render_list(
         }
     }
 
+    let mut active_dropdown = None;
     if let Some((x, y, options, descs, selected, scroll_offset, filter_buffer)) = edit_overlay_info
     {
-        let visible = render_dropdown(
+        let (visible, tip, dropdown) = render_dropdown(
             area,
             buf,
             x,
@@ -921,7 +928,11 @@ fn render_list(
             state,
         );
         state.dropdown_visible_items = visible;
+        active_tip = tip;
+        active_dropdown = dropdown;
     }
+
+    (active_tip, active_dropdown)
 }
 
 fn render_dropdown(
@@ -936,9 +947,9 @@ fn render_dropdown(
     _filter_buffer: &str,
     theme: &Theme,
     state: &EditorState,
-) -> usize {
+) -> (usize, Option<Rect>, Option<Rect>) {
     if options.is_empty() {
-        return 0;
+        return (0, None, None);
     }
 
     let max_opt_width = options
@@ -990,7 +1001,7 @@ fn render_dropdown(
 
     // Render scrollbar if needed
     if options.len() > visible_items {
-        let scrollbar_x = popup_area.right().saturating_sub(2);
+        let scrollbar_x = popup_area.right().saturating_sub(1);
         let scrollbar_height = visible_items as u16;
         let max_scroll = (options.len() - visible_items) as u16;
         let thumb_position = if max_scroll > 0 {
@@ -1007,6 +1018,7 @@ fn render_dropdown(
         }
     }
 
+    let mut tip_area = None;
     // Render description tooltip for the selected item using render_tooltip
     if let Some(desc) = descriptions.get(selected).and_then(|d| d.as_ref()) {
         if !desc.is_empty() {
@@ -1028,7 +1040,7 @@ fn render_dropdown(
                 let sel_row = selected.saturating_sub(scroll_offset) as u16;
                 let tip_y = popup_y + 1 + sel_row;
 
-                render_tooltip(
+                let rect = render_tooltip(
                     area,
                     buf,
                     tip_x,
@@ -1039,11 +1051,12 @@ fn render_dropdown(
                     None,
                     state,
                 );
+                tip_area = Some(rect);
             }
         }
     }
 
-    visible_items
+    (visible_items, tip_area, Some(popup_area))
 }
 
 fn render_tooltip(
@@ -1056,7 +1069,7 @@ fn render_tooltip(
     theme: &Theme,
     item_bg: Option<Color>,
     state: &EditorState,
-) {
+) -> Rect {
     let desc_style = Style::default().fg(Color::Rgb(108, 112, 134)); // Overlay1
     let mut desc_style = desc_style;
     if let Some(bg) = item_bg {
@@ -1066,7 +1079,7 @@ fn render_tooltip(
     // Text wrapping
     let lines = wrap_text(desc, max_tip_width as usize);
     if lines.is_empty() {
-        return;
+        return Rect::default();
     }
 
     let total_lines = lines.len();
@@ -1157,6 +1170,7 @@ fn render_tooltip(
             }
         }
     }
+    tip_area
 }
 
 fn render_wrapped_text(
@@ -1427,7 +1441,7 @@ fn format_type_name(t: &str) -> String {
     .to_string()
 }
 
-pub(crate) fn extract_description(sub_schema: &serde_json::Value) -> Option<String> {
+pub fn extract_description(sub_schema: &serde_json::Value) -> Option<String> {
     sub_schema
         .get("description")
         .and_then(|v| v.as_str())
@@ -1462,7 +1476,7 @@ fn format_type_placeholder(sub_schema: &serde_json::Value) -> Option<String> {
     None
 }
 
-fn wrap_text(desc: &str, max_width: usize) -> Vec<String> {
+pub fn wrap_text(desc: &str, max_width: usize) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
     let mut remaining = desc;
     while !remaining.is_empty() {

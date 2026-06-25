@@ -236,6 +236,10 @@ pub struct EditorState {
     pub last_backspace_time: Option<std::time::Instant>,
     /// Scroll offset of the active schema description tooltip
     pub tooltip_scroll_offset: usize,
+    /// Area of the currently rendered tooltip (if active)
+    pub tooltip_area: Option<ratatui::layout::Rect>,
+    /// Area of the currently rendered dropdown menu (if active)
+    pub dropdown_area: Option<ratatui::layout::Rect>,
 }
 
 impl EditorState {
@@ -278,6 +282,8 @@ impl EditorState {
             all_nodes_cache: Vec::new(),
             last_backspace_time: None,
             tooltip_scroll_offset: 0,
+            tooltip_area: None,
+            dropdown_area: None,
         };
         state.rebuild_flattened();
         state
@@ -299,11 +305,81 @@ impl EditorState {
     }
 
     /// Given a y offset relative to the list area top, return the flattened node index.
-    pub fn node_index_at_y(&self, y: usize) -> Option<usize> {
+    pub fn node_index_at_y(&self, y: usize, list_area: ratatui::layout::Rect) -> Option<usize> {
         let mut current_y: usize = 0;
         let mut idx = self.scroll_offset;
         while idx < self.flattened_nodes.len() {
-            let lines = 1; // Always 1 line in non-edit mode
+            let mut lines = 1;
+            if idx == self.selected {
+                if let Some(node) = self.selected_node() {
+                    let x_offset = (node.depth as u16).saturating_mul(2);
+                    let actual_key_len =
+                        unicode_width::UnicodeWidthStr::width(node.key.as_str()) as u16;
+                    let mut type_hint_width = 0;
+                    if self.show_type_hints {
+                        if let Some(schema) = &self.schema {
+                            if let Some(sub) = crate::edit::find_sub_schema(schema, &node.path) {
+                                let node_pointer = to_json_pointer(&node.path);
+                                let node_value = self.data.pointer(&node_pointer);
+                                let type_hint_text =
+                                    crate::render::extract_type_hint_for_value(sub, node_value);
+                                type_hint_width =
+                                    unicode_width::UnicodeWidthStr::width(type_hint_text.as_str())
+                                        as u16;
+                            }
+                        }
+                    }
+                    let colon_x = list_area
+                        .x
+                        .saturating_add(x_offset)
+                        .saturating_add(2)
+                        .saturating_add(actual_key_len)
+                        .saturating_add(type_hint_width);
+                    let first_line_val_x = colon_x.saturating_add(2);
+                    let first_line_width =
+                        list_area.right().saturating_sub(first_line_val_x) as usize;
+                    let wrapped_val_x = list_area.x.saturating_add(x_offset).saturating_add(2);
+                    let wrapped_line_width =
+                        list_area.right().saturating_sub(wrapped_val_x) as usize;
+
+                    let mut node_height = 1;
+                    let text_to_measure = match &self.edit_mode {
+                        EditMode::TextPrompt { buffer, .. }
+                        | EditMode::NewKeyPrompt { buffer, .. } => Some(buffer.as_str()),
+                        EditMode::Normal => Some(node.value_display.as_str()),
+                        _ => None,
+                    };
+                    if let Some(text) = text_to_measure {
+                        if text.len() > first_line_width && first_line_width > 0 {
+                            let remaining = text.len() - first_line_width;
+                            if wrapped_line_width > 0 {
+                                node_height =
+                                    1 + (remaining + wrapped_line_width - 1) / wrapped_line_width;
+                            }
+                        }
+                    }
+
+                    if let Some(schema) = &self.schema {
+                        if let Some(sub) = crate::edit::find_sub_schema(schema, &node.path) {
+                            if let Some(desc) = crate::render::extract_description(sub) {
+                                let node_x = list_area.x.saturating_add(x_offset);
+                                let max_tip_width = list_area
+                                    .right()
+                                    .saturating_sub(node_x)
+                                    .saturating_sub(2)
+                                    .clamp(20, 60);
+                                let tip_lines =
+                                    crate::render::wrap_text(&desc, max_tip_width as usize).len();
+                                let display_lines = tip_lines.min(8);
+                                node_height += display_lines + 2;
+                            }
+                        }
+                    }
+
+                    lines = node_height;
+                }
+            }
+
             if y >= current_y && y < current_y + lines {
                 return Some(idx);
             }
@@ -324,11 +400,32 @@ impl EditorState {
         y: u16,
         list_area: ratatui::layout::Rect,
     ) -> (Option<usize>, HitResult) {
+        if let Some(drop_area) = self.dropdown_area {
+            if x >= drop_area.x
+                && x < drop_area.x.saturating_add(drop_area.width)
+                && y >= drop_area.y
+                && y < drop_area.y.saturating_add(drop_area.height)
+            {
+                return (None, HitResult::None);
+            }
+        }
+
+        if let Some(tip_area) = self.tooltip_area {
+            if x >= tip_area.x
+                && x < tip_area.x.saturating_add(tip_area.width)
+                && y >= tip_area.y
+                && y < tip_area.y.saturating_add(tip_area.height)
+            {
+                return (None, HitResult::None);
+            }
+        }
+
         // 1. Convert y coordinate to node index (using node_index_at_y)
-        let node_idx = match self.node_index_at_y((y.saturating_sub(list_area.y)) as usize) {
-            Some(idx) => idx,
-            None => return (None, HitResult::None),
-        };
+        let node_idx =
+            match self.node_index_at_y((y.saturating_sub(list_area.y)) as usize, list_area) {
+                Some(idx) => idx,
+                None => return (None, HitResult::None),
+            };
 
         let node = match self.flattened_nodes.get(node_idx) {
             Some(n) => n,
@@ -407,6 +504,126 @@ impl EditorState {
             (Some(node_idx), HitResult::Value)
         } else {
             (Some(node_idx), HitResult::Key)
+        }
+    }
+
+    /// Select a dropdown item by its visible (filtered) index and commit the choice.
+    /// Returns true if the item was selected and committed.
+    pub fn select_dropdown_item(&mut self, visible_index: usize) -> bool {
+        match &mut self.edit_mode {
+            EditMode::Dropdown {
+                selected,
+                filtered_indices,
+                ..
+            } => {
+                if visible_index < filtered_indices.len() {
+                    let original_idx = filtered_indices[visible_index];
+                    *selected = original_idx;
+                    crate::edit::apply_edit(self);
+                    return true;
+                }
+            }
+            EditMode::NewKeyDropdown {
+                selected,
+                filtered_indices,
+                ..
+            } => {
+                if visible_index < filtered_indices.len() {
+                    let original_idx = filtered_indices[visible_index];
+                    *selected = original_idx;
+                    crate::edit::apply_edit(self);
+                    return true;
+                }
+            }
+            EditMode::OneOfVariantDropdown {
+                selected,
+                filtered_indices,
+                ..
+            } => {
+                if visible_index < filtered_indices.len() {
+                    let original_idx = filtered_indices[visible_index];
+                    *selected = original_idx;
+                    crate::edit::apply_oneof_variant(self);
+                    return true;
+                }
+            }
+            _ => {}
+        }
+        false
+    }
+
+    /// Hover over a dropdown item by its visible (filtered) index.
+    /// Moves the highlight without committing. Returns true if the hover was applied.
+    pub fn hover_dropdown_item(&mut self, visible_index: usize) -> bool {
+        match &mut self.edit_mode {
+            EditMode::Dropdown {
+                selected,
+                filtered_indices,
+                ..
+            }
+            | EditMode::NewKeyDropdown {
+                selected,
+                filtered_indices,
+                ..
+            }
+            | EditMode::OneOfVariantDropdown {
+                selected,
+                filtered_indices,
+                ..
+            } => {
+                if visible_index < filtered_indices.len() {
+                    self.tooltip_scroll_offset = 0;
+                    *selected = visible_index;
+                    return true;
+                }
+            }
+            _ => {}
+        }
+        false
+    }
+
+    /// Scroll the dropdown list by delta items. Positive scrolls down, negative scrolls up.
+    /// Returns true if the scroll was applied.
+    pub fn scroll_dropdown(&mut self, delta: i32) -> bool {
+        match &mut self.edit_mode {
+            EditMode::Dropdown {
+                selected,
+                scroll_offset,
+                filtered_indices,
+                ..
+            }
+            | EditMode::NewKeyDropdown {
+                selected,
+                scroll_offset,
+                filtered_indices,
+                ..
+            }
+            | EditMode::OneOfVariantDropdown {
+                selected,
+                scroll_offset,
+                filtered_indices,
+                ..
+            } => {
+                let total = filtered_indices.len();
+                if total == 0 {
+                    return false;
+                }
+                self.tooltip_scroll_offset = 0;
+                let visible = self.dropdown_visible_items;
+                if delta > 0 {
+                    *selected = (*selected + delta as usize).min(total - 1);
+                } else {
+                    *selected = (*selected).saturating_sub((-delta) as usize);
+                }
+                if visible > 0 && *selected >= *scroll_offset + visible {
+                    *scroll_offset = *selected + 1 - visible;
+                }
+                if *selected < *scroll_offset {
+                    *scroll_offset = *selected;
+                }
+                true
+            }
+            _ => false,
         }
     }
 
@@ -1228,8 +1445,12 @@ impl EditorState {
 
     pub fn handle_key_event(&mut self, event: crossterm::event::KeyEvent) -> crate::action::Action {
         let prev_selected = self.selected;
+        let prev_edit_mode = self.edit_mode.clone();
         let action = self.handle_key_event_inner(event);
-        if self.selected != prev_selected || !matches!(self.edit_mode, EditMode::Normal) {
+        if self.selected != prev_selected
+            || !matches!(self.edit_mode, EditMode::Normal)
+            || !matches!(prev_edit_mode, EditMode::Normal)
+        {
             self.scroll_to_selected = true;
         }
         action
@@ -2938,5 +3159,29 @@ mod tests {
         let event = KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL);
         state.handle_key_event(event);
         assert_eq!(state.data, json!({"a": 1, "b": 2}));
+    }
+
+    #[test]
+    fn test_handle_key_event_scroll_on_mode_change() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let data = json!({"a": 1, "b": 2});
+        let mut state = EditorState::new(data, Format::Json, None, None);
+        state.selected = 1;
+        state.scroll_to_selected = false;
+
+        state.edit_mode = EditMode::Dropdown {
+            options: vec!["opt1".to_string()],
+            descriptions: vec![None],
+            selected: 0,
+            scroll_offset: 0,
+            filter_buffer: String::new(),
+            filtered_indices: vec![0],
+        };
+
+        let event = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        state.handle_key_event(event);
+
+        assert!(matches!(state.edit_mode, EditMode::Normal));
+        assert!(state.scroll_to_selected);
     }
 }
