@@ -51,17 +51,21 @@ fn flatten_recursive(
     };
 
     // InferNodeType using Schema if node is Null
+    // Skip this for actual Null values — let the user edit null as a leaf.
+    // The oneOf/anyOf variant picker in start_edit_impl handles type selection.
     if let NodeType::Leaf = node_type {
-        if let Some(s) = schema {
-            if let Some(sub_schema) = crate::edit::find_sub_schema(s, &path) {
-                let (_, t) = crate::edit::resolve_schema_type_and_default(s, sub_schema);
-                if let Some(t_str) = t {
-                    if t_str == "array" {
-                        node_type = NodeType::Array { child_count: 0 };
-                        value_type = ValueType::Array;
-                    } else if t_str == "object" {
-                        node_type = NodeType::Object { child_count: 0 };
-                        value_type = ValueType::Object;
+        if !value.is_null() {
+            if let Some(s) = schema {
+                if let Some(sub_schema) = crate::edit::find_sub_schema(s, &path) {
+                    let (_, t) = crate::edit::resolve_schema_type_and_default(s, sub_schema);
+                    if let Some(t_str) = t {
+                        if t_str == "array" {
+                            node_type = NodeType::Array { child_count: 0 };
+                            value_type = ValueType::Array;
+                        } else if t_str == "object" {
+                            node_type = NodeType::Object { child_count: 0 };
+                            value_type = ValueType::Object;
+                        }
                     }
                 }
             }

@@ -53,7 +53,7 @@ impl SchemaFetcher {
 
         let client = CLIENT.get_or_init(|| {
             reqwest::Client::builder()
-                .user_agent("clise/0.1.1")
+                .user_agent("clise/0.2.0")
                 .build()
                 .expect("Failed to build reqwest client")
         });

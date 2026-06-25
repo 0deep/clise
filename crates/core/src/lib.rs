@@ -35,6 +35,6 @@ pub mod prelude {
     pub use crate::format::Format;
     pub use crate::navigate;
     pub use crate::render::SchemaEditor;
-    pub use crate::state::{EditMode, EditorState, NodeType, SchemaState, UiNode};
+    pub use crate::state::{EditMode, EditorState, HitResult, NodeType, SchemaState, UiNode};
     pub use crate::theme::Theme;
 }

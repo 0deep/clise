@@ -58,7 +58,11 @@ pub enum EditMode {
     /// Enum dropdown popup
     Dropdown {
         options: Vec<String>,
+        descriptions: Vec<Option<String>>,
         selected: usize,
+        scroll_offset: usize,
+        filter_buffer: String,
+        filtered_indices: Vec<usize>,
     },
     /// Text input prompt
     TextPrompt { buffer: String, cursor_pos: usize },
@@ -67,7 +71,12 @@ pub enum EditMode {
         parent_path: Vec<String>,
         temp_key: String,
         options: Vec<String>,
+        descriptions: Vec<Option<String>>,
         selected: usize,
+        scroll_offset: usize,
+        filter_buffer: String,
+        cursor_pos: usize,
+        filtered_indices: Vec<usize>,
     },
     /// Text input for adding a new key (includes parent node path and temporary key)
     NewKeyPrompt {
@@ -90,6 +99,30 @@ pub enum EditMode {
     SearchPrompt { buffer: String, cursor_pos: usize },
     /// Help modal
     Help,
+    /// Dropdown for selecting a oneOf/anyOf variant when value is null
+    OneOfVariantDropdown {
+        parent_path: Vec<String>,
+        target_key: String,
+        options: Vec<String>,
+        descriptions: Vec<Option<String>>,
+        selected: usize,
+        scroll_offset: usize,
+        filter_buffer: String,
+        cursor_pos: usize,
+        filtered_indices: Vec<usize>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HitResult {
+    /// Clicked on ▶/▼ triangle (toggle collapse/expand)
+    Triangle,
+    /// Clicked on key name
+    Key,
+    /// Clicked on value
+    Value,
+    /// Empty area
+    None,
 }
 
 /// Types of completion suggestion items
@@ -195,6 +228,8 @@ pub struct EditorState {
     pub hovered_node: Option<usize>,
     /// Whether to scroll viewport to keep selected node visible
     pub scroll_to_selected: bool,
+    /// Number of visible items in the current dropdown popup
+    pub dropdown_visible_items: usize,
     /// Cache of all encountered nodes' expanded states to preserve them even when collapsed
     pub(crate) all_nodes_cache: Vec<UiNode>,
     /// Last time backspace was pressed (to prevent accidental rename prompt)
@@ -237,6 +272,7 @@ impl EditorState {
             renamed_keys: std::collections::HashMap::new(),
             hovered_node: None,
             scroll_to_selected: true,
+            dropdown_visible_items: 10,
             all_nodes_cache: Vec::new(),
             last_backspace_time: None,
         };
@@ -275,6 +311,100 @@ impl EditorState {
             idx += 1;
         }
         None
+    }
+
+    /// Returns which UI element is located at the given coordinates.
+    /// list_area: The Rect passed to render_list.
+    pub fn hit_test(
+        &self,
+        x: u16,
+        y: u16,
+        list_area: ratatui::layout::Rect,
+    ) -> (Option<usize>, HitResult) {
+        // 1. Convert y coordinate to node index (using node_index_at_y)
+        let node_idx = match self.node_index_at_y((y.saturating_sub(list_area.y)) as usize) {
+            Some(idx) => idx,
+            None => return (None, HitResult::None),
+        };
+
+        let node = match self.flattened_nodes.get(node_idx) {
+            Some(n) => n,
+            None => return (None, HitResult::None),
+        };
+
+        let x_offset = (node.depth as u16).saturating_mul(2);
+        let prefix_x = list_area.x.saturating_add(x_offset); // Start of ▶/▼
+        let key_x = prefix_x.saturating_add(2); // Start of key
+
+        // Calculate key width
+        let is_editing_key = match &self.edit_mode {
+            EditMode::NewKeyPrompt {
+                parent_path,
+                temp_key,
+                ..
+            }
+            | EditMode::NewKeyDropdown {
+                parent_path,
+                temp_key,
+                ..
+            } => node.path.starts_with(parent_path) && node.path.last() == Some(temp_key),
+            EditMode::RenameKeyPrompt {
+                parent_path,
+                original_key,
+                ..
+            } => node.path.starts_with(parent_path) && node.path.last() == Some(original_key),
+            _ => false,
+        };
+
+        let key_width = if is_editing_key {
+            match &self.edit_mode {
+                EditMode::NewKeyPrompt { buffer, .. }
+                | EditMode::RenameKeyPrompt { buffer, .. } => {
+                    unicode_width::UnicodeWidthStr::width(buffer.as_str()) as u16
+                }
+                EditMode::NewKeyDropdown { .. } => 12, // "(Select Key)" length
+                _ => unicode_width::UnicodeWidthStr::width(node.key.as_str()) as u16,
+            }
+        } else {
+            unicode_width::UnicodeWidthStr::width(node.key.as_str()) as u16
+        };
+
+        // Calculate type hint width
+        let mut type_hint_width = 0;
+        if self.show_type_hints && !is_editing_key {
+            if let Some(schema) = &self.schema {
+                if let Some(sub) = crate::edit::find_sub_schema(schema, &node.path) {
+                    let node_pointer = to_json_pointer(&node.path);
+                    let node_value = self.data.pointer(&node_pointer);
+                    let type_hint_text =
+                        crate::render::extract_type_hint_for_value(sub, node_value);
+                    type_hint_width =
+                        unicode_width::UnicodeWidthStr::width(type_hint_text.as_str()) as u16;
+                }
+            }
+        }
+
+        let colon_x = key_x
+            .saturating_add(key_width)
+            .saturating_add(type_hint_width);
+        let value_x = colon_x.saturating_add(2); // After ": "
+
+        // 2. Determine the region by x coordinate
+        if x >= prefix_x && x < prefix_x.saturating_add(2) {
+            // Triangle region
+            match node.node_type {
+                NodeType::Object { .. } | NodeType::Array { .. } => {
+                    (Some(node_idx), HitResult::Triangle)
+                }
+                _ => (Some(node_idx), HitResult::Key),
+            }
+        } else if x >= key_x && x < colon_x {
+            (Some(node_idx), HitResult::Key)
+        } else if x >= value_x {
+            (Some(node_idx), HitResult::Value)
+        } else {
+            (Some(node_idx), HitResult::Key)
+        }
     }
 
     pub fn is_node_modified(&self, path: &[String]) -> bool {
@@ -1377,13 +1507,57 @@ impl EditorState {
                                     }
                                     let new_cursor_pos = new_buffer.chars().count();
 
-                                    self.edit_mode = EditMode::RenameKeyPrompt {
-                                        parent_path,
-                                        original_key,
-                                        buffer: new_buffer,
-                                        cursor_pos: new_cursor_pos,
-                                        value: current_value,
-                                    };
+                                    // Check if schema has options for this parent object
+                                    let addable = crate::edit::get_addable_keys_with_descriptions(
+                                        self,
+                                        &parent_path,
+                                    );
+                                    if !addable.is_empty() {
+                                        let mut options: Vec<String> =
+                                            addable.iter().map(|(k, _)| k.clone()).collect();
+                                        let mut descs: Vec<Option<String>> =
+                                            addable.into_iter().map(|(_, d)| d).collect();
+                                        if !options.contains(&original_key) {
+                                            let idx =
+                                                options.partition_point(|k| k < &original_key);
+                                            options.insert(idx, original_key.clone());
+                                            descs.insert(idx, None);
+                                        }
+
+                                        let filtered_indices: Vec<usize> = options
+                                            .iter()
+                                            .enumerate()
+                                            .filter(|(_, opt)| {
+                                                if new_buffer.is_empty() {
+                                                    true
+                                                } else {
+                                                    opt.to_lowercase()
+                                                        .contains(&new_buffer.to_lowercase())
+                                                }
+                                            })
+                                            .map(|(i, _)| i)
+                                            .collect();
+
+                                        self.edit_mode = EditMode::NewKeyDropdown {
+                                            parent_path,
+                                            temp_key: original_key.clone(),
+                                            options,
+                                            descriptions: descs,
+                                            selected: 0,
+                                            scroll_offset: 0,
+                                            filter_buffer: new_buffer,
+                                            cursor_pos: new_cursor_pos,
+                                            filtered_indices,
+                                        };
+                                    } else {
+                                        self.edit_mode = EditMode::RenameKeyPrompt {
+                                            parent_path,
+                                            original_key,
+                                            buffer: new_buffer,
+                                            cursor_pos: new_cursor_pos,
+                                            value: current_value,
+                                        };
+                                    }
                                 }
                             }
                         }
@@ -1399,17 +1573,229 @@ impl EditorState {
                     _ => {}
                 }
             }
-            EditMode::Dropdown { options, selected }
-            | EditMode::NewKeyDropdown {
-                options, selected, ..
+            EditMode::Dropdown {
+                options,
+                descriptions: _,
+                selected,
+                scroll_offset,
+                filter_buffer,
+                filtered_indices,
             } => match event.code {
-                KeyCode::Enter => crate::edit::apply_edit(self),
+                KeyCode::Enter => {
+                    if !filtered_indices.is_empty() {
+                        let original_idx = filtered_indices[*selected];
+                        *selected = original_idx;
+                    }
+                    crate::edit::apply_edit(self);
+                }
                 KeyCode::Esc => crate::edit::cancel_edit(self),
                 KeyCode::Up if *selected > 0 => {
                     *selected -= 1;
+                    if *selected < *scroll_offset {
+                        *scroll_offset = *selected;
+                    }
                 }
-                KeyCode::Down if *selected + 1 < options.len() => {
+                KeyCode::Down if *selected + 1 < filtered_indices.len() => {
                     *selected += 1;
+                    let visible = self.dropdown_visible_items;
+                    if visible > 0 && *selected >= *scroll_offset + visible {
+                        *scroll_offset = *selected + 1 - visible;
+                    }
+                }
+                KeyCode::Char(c) => {
+                    filter_buffer.push(c);
+                    *filtered_indices = options
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, opt)| {
+                            opt.to_lowercase().contains(&filter_buffer.to_lowercase())
+                        })
+                        .map(|(i, _)| i)
+                        .collect();
+                    *selected = 0;
+                    *scroll_offset = 0;
+                }
+                KeyCode::Backspace => {
+                    if !filter_buffer.is_empty() {
+                        filter_buffer.pop();
+                        *filtered_indices = options
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, opt)| {
+                                if filter_buffer.is_empty() {
+                                    true
+                                } else {
+                                    opt.to_lowercase().contains(&filter_buffer.to_lowercase())
+                                }
+                            })
+                            .map(|(i, _)| i)
+                            .collect();
+                        *selected = 0;
+                        *scroll_offset = 0;
+                    }
+                }
+                _ => {}
+            },
+            EditMode::NewKeyDropdown {
+                options,
+                selected,
+                scroll_offset,
+                filter_buffer,
+                cursor_pos,
+                filtered_indices,
+                ..
+            } => match event.code {
+                KeyCode::Enter => {
+                    if !filtered_indices.is_empty() {
+                        let original_idx = filtered_indices[*selected];
+                        *selected = original_idx;
+                    }
+                    crate::edit::apply_edit(self);
+                }
+                KeyCode::Esc => crate::edit::cancel_edit(self),
+                KeyCode::Up if *selected > 0 => {
+                    *selected -= 1;
+                    if *selected < *scroll_offset {
+                        *scroll_offset = *selected;
+                    }
+                }
+                KeyCode::Down if *selected + 1 < filtered_indices.len() => {
+                    *selected += 1;
+                    let visible = self.dropdown_visible_items;
+                    if visible > 0 && *selected >= *scroll_offset + visible {
+                        *scroll_offset = *selected + 1 - visible;
+                    }
+                }
+                KeyCode::Char(c) => {
+                    let byte_idx = Self::char_to_byte_index(filter_buffer, *cursor_pos);
+                    filter_buffer.insert(byte_idx, c);
+                    *cursor_pos += 1;
+                    *filtered_indices = options
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, opt)| {
+                            opt.to_lowercase().contains(&filter_buffer.to_lowercase())
+                        })
+                        .map(|(i, _)| i)
+                        .collect();
+                    *selected = 0;
+                    *scroll_offset = 0;
+                }
+                KeyCode::Backspace => {
+                    if *cursor_pos > 0 {
+                        *cursor_pos -= 1;
+                        let byte_idx = Self::char_to_byte_index(filter_buffer, *cursor_pos);
+                        filter_buffer.remove(byte_idx);
+                        *filtered_indices = options
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, opt)| {
+                                if filter_buffer.is_empty() {
+                                    true
+                                } else {
+                                    opt.to_lowercase().contains(&filter_buffer.to_lowercase())
+                                }
+                            })
+                            .map(|(i, _)| i)
+                            .collect();
+                        *selected = 0;
+                        *scroll_offset = 0;
+                    }
+                }
+                KeyCode::Left if *cursor_pos > 0 => {
+                    *cursor_pos -= 1;
+                }
+                KeyCode::Right if *cursor_pos < filter_buffer.chars().count() => {
+                    *cursor_pos += 1;
+                }
+                KeyCode::Home => {
+                    *cursor_pos = 0;
+                }
+                KeyCode::End => {
+                    *cursor_pos = filter_buffer.chars().count();
+                }
+                _ => {}
+            },
+            EditMode::OneOfVariantDropdown {
+                options,
+                selected,
+                scroll_offset,
+                filter_buffer,
+                cursor_pos,
+                filtered_indices,
+                ..
+            } => match event.code {
+                KeyCode::Enter => {
+                    if !filtered_indices.is_empty() {
+                        let original_idx = filtered_indices[*selected];
+                        *selected = original_idx;
+                    }
+                    crate::edit::apply_oneof_variant(self);
+                }
+                KeyCode::Esc => {
+                    // Cancel: restore null value
+                    self.edit_mode = EditMode::Normal;
+                }
+                KeyCode::Up if *selected > 0 => {
+                    *selected -= 1;
+                    if *selected < *scroll_offset {
+                        *scroll_offset = *selected;
+                    }
+                }
+                KeyCode::Down if *selected + 1 < filtered_indices.len() => {
+                    *selected += 1;
+                    let visible = self.dropdown_visible_items;
+                    if visible > 0 && *selected >= *scroll_offset + visible {
+                        *scroll_offset = *selected + 1 - visible;
+                    }
+                }
+                KeyCode::Char(c) => {
+                    let byte_idx = Self::char_to_byte_index(filter_buffer, *cursor_pos);
+                    filter_buffer.insert(byte_idx, c);
+                    *cursor_pos += 1;
+                    *filtered_indices = options
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, opt)| {
+                            opt.to_lowercase().contains(&filter_buffer.to_lowercase())
+                        })
+                        .map(|(i, _)| i)
+                        .collect();
+                    *selected = 0;
+                    *scroll_offset = 0;
+                }
+                KeyCode::Backspace => {
+                    if *cursor_pos > 0 {
+                        *cursor_pos -= 1;
+                        let byte_idx = Self::char_to_byte_index(filter_buffer, *cursor_pos);
+                        filter_buffer.remove(byte_idx);
+                        *filtered_indices = options
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, opt)| {
+                                if filter_buffer.is_empty() {
+                                    true
+                                } else {
+                                    opt.to_lowercase().contains(&filter_buffer.to_lowercase())
+                                }
+                            })
+                            .map(|(i, _)| i)
+                            .collect();
+                        *selected = 0;
+                        *scroll_offset = 0;
+                    }
+                }
+                KeyCode::Left if *cursor_pos > 0 => {
+                    *cursor_pos -= 1;
+                }
+                KeyCode::Right if *cursor_pos < filter_buffer.chars().count() => {
+                    *cursor_pos += 1;
+                }
+                KeyCode::Home => {
+                    *cursor_pos = 0;
+                }
+                KeyCode::End => {
+                    *cursor_pos = filter_buffer.chars().count();
                 }
                 _ => {}
             },
