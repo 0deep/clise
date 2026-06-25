@@ -11,6 +11,22 @@ OWNER="0deep"  # Replace with actual GitHub owner
 REPO="clise"
 BINARY_NAME="clise"
 
+# Detect actual user when running with sudo
+if [ -n "${SUDO_USER-}" ]; then
+    INSTALL_UID="$SUDO_UID"
+    INSTALL_GID="${SUDO_GID:-$SUDO_UID}"
+    # Restore original user's HOME if it was changed to /root
+    if [ "$HOME" = "/root" ]; then
+        ORIG_HOME=$(getent passwd "$SUDO_USER" | cut -d: -f6)
+        if [ -n "$ORIG_HOME" ] && [ -d "$ORIG_HOME" ]; then
+            HOME="$ORIG_HOME"
+        fi
+    fi
+else
+    INSTALL_UID=$(id -u)
+    INSTALL_GID=$(id -g)
+fi
+
 if [ -z "${INSTALL_DIR-}" ]; then
     if [ "$(id -u)" -eq 0 ]; then
         INSTALL_DIR="/usr/local/bin"
@@ -151,10 +167,25 @@ echo "📦 Extracting package..."
 tar -xzf "$TMP_DIR/clise.tar.gz" -C "$TMP_DIR"
 
 # 4. Install binary
+# Clean up existing local installation if installing globally with sudo
+# to prevent PATH shadowing (where an older local version runs instead of the new global one)
+if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER-}" ]; then
+    LOCAL_BIN_DIR="$HOME/.local/bin"
+    if [ -f "$LOCAL_BIN_DIR/$BINARY_NAME" ]; then
+        echo "🧹 Found existing local installation at $LOCAL_BIN_DIR/$BINARY_NAME. Removing to prevent PATH shadowing..."
+        rm -f "$LOCAL_BIN_DIR/$BINARY_NAME"
+    fi
+    if [ -h "$LOCAL_BIN_DIR/se" ] || [ -f "$LOCAL_BIN_DIR/se" ]; then
+        rm -f "$LOCAL_BIN_DIR/se"
+    fi
+fi
+
 mkdir -p "$INSTALL_DIR"
 mv "$TMP_DIR/$BINARY_NAME" "$INSTALL_DIR/$BINARY_NAME"
 chmod +x "$INSTALL_DIR/$BINARY_NAME"
+chown "$INSTALL_UID:$INSTALL_GID" "$INSTALL_DIR/$BINARY_NAME" 2>/dev/null || true
 ln -sf "$BINARY_NAME" "$INSTALL_DIR/se"
+chown -h "$INSTALL_UID:$INSTALL_GID" "$INSTALL_DIR/se" 2>/dev/null || true
 echo "✅ Installed binary successfully to $INSTALL_DIR/$BINARY_NAME"
 echo "🔗 Created symbolic link 'se' -> '$BINARY_NAME' in $INSTALL_DIR"
 
@@ -167,6 +198,7 @@ case "$CURRENT_SHELL" in
     bash)
         mkdir -p "$COMP_DIR_BASH"
         if "$INSTALL_DIR/$BINARY_NAME" generate-completion bash > "$COMP_DIR_BASH/$BINARY_NAME" 2>/dev/null; then
+            chown "$INSTALL_UID:$INSTALL_GID" "$COMP_DIR_BASH/$BINARY_NAME" 2>/dev/null || true
             echo "✅ Bash completion auto-installed to $COMP_DIR_BASH/$BINARY_NAME"
         else
             echo "⚠️ Failed to auto-generate Bash completion."
@@ -175,6 +207,7 @@ case "$CURRENT_SHELL" in
     zsh)
         mkdir -p "$COMP_DIR_ZSH"
         if "$INSTALL_DIR/$BINARY_NAME" generate-completion zsh > "$COMP_DIR_ZSH/_$BINARY_NAME" 2>/dev/null; then
+            chown "$INSTALL_UID:$INSTALL_GID" "$COMP_DIR_ZSH/_$BINARY_NAME" 2>/dev/null || true
             echo "✅ Zsh completion auto-installed to $COMP_DIR_ZSH/_$BINARY_NAME"
             
             # Setup path hint

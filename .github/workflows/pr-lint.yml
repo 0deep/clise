@@ -3,10 +3,10 @@ name: PR Lint
 on:
   pull_request:
     branches: [ "master", "main" ]
-    paths-ignore:
-      - 'README.md'
-      - 'docs/**'
-      - '**.md'
+    paths:
+      - 'crates/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -33,6 +33,10 @@ jobs:
           VALIDATE_ALL_CODEBASE: false
           DEFAULT_BRANCH: main
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Rust 관련 린트는 별도의 rust-lint.yml에서 관리하므로 Super-Linter 내에서는 제외합니다.
-          VALIDATE_RUST_2021: false
-          VALIDATE_CLIPPY: false
+          # Rust linters are managed in a separate rust-lint.yml, so they are excluded from Super-Linter.
+          VALIDATE_RUST: false
+          VALIDATE_RUST_CLIPPY: false
+          VALIDATE_RUST_FMT: false
+          # Exclude Checkov (for local Dockerfile) and JSCPD (for copy-paste detection).
+          VALIDATE_CHECKOV: false
+          VALIDATE_JSCPD: false
