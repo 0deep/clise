@@ -1,6 +1,6 @@
 [dependencies]
 crossterm = "=0.29.0"
-md5 = "=0.7.0"
+md5 = "=0.8.0"
 tui-input = "=0.15.3"
 unicode-width = "=0.2.2"
 
@@ -10,7 +10,7 @@ version = "=6.0.0"
 
 [dependencies.jsonschema]
 optional = true
-version = "=0.46.5"
+version = "=0.46.6"
 
 [dependencies.ratatui]
 workspace = true
