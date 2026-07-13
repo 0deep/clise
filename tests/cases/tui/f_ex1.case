@@ -1,0 +1,7 @@
+id: F-EX1
+title: Navigate to node via search then edit/save
+fixture: fixtures/o1.yaml
+size: 140x40
+keys: f type:note Enter Esc Enter Backspace Backspace Backspace Backspace Backspace type:edited Enter s
+expect_contains:
+  note: edited

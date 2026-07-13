@@ -1,0 +1,8 @@
+id: F-EX3
+title: Save prompt y behavior (save+exit)
+fixture: fixtures/o1.yaml
+size: 140x40
+keys: Down / q y
+expect_contains:
+  # name: old
+  count: 1

@@ -1,0 +1,9 @@
+id: C4.2
+title: Move other item while first array item is commented (nested array)
+fixture: fixtures/move_arr.yaml
+size: 140x40
+keys: Right Down / Down Ctrl+Up s
+expect_contains:
+  # - apple
+  banana
+  cherry

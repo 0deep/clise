@@ -1,0 +1,10 @@
+id: O-EX1
+title: Comment first object key then save/verify
+fixture: fixtures/o1.yaml
+size: 140x40
+keys: Down / s
+expect_contains:
+  # name: old
+  count: 1
+  active: true
+  note: hello

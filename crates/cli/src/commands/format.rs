@@ -1,4 +1,4 @@
-use clise_core::format::{Format, detect, parse, serialize};
+use clise_core::format::{Format, detect, parse};
 use std::fs;
 use std::io::{self, Read};
 
@@ -57,12 +57,15 @@ pub fn run(
     };
 
     // 5. Serialize with target format, preserving comments if possible
-    let original_text = if input_format == target_format {
-        Some(content.as_str())
+    let (nodes, root) = if input_format == target_format {
+        match clise_core::format::parse_annotated(&content, target_format) {
+            Ok(pair) => pair,
+            Err(_) => clise_core::format::value_to_annotated(&parsed_val),
+        }
     } else {
-        None
+        clise_core::format::value_to_annotated(&parsed_val)
     };
-    let formatted = match serialize(&parsed_val, target_format, original_text, false) {
+    let formatted = match clise_core::format::serialize_annotated(&nodes, root, target_format) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("Error formatting output as {:?}: {}", target_format, e);

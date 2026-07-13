@@ -1,220 +1,11 @@
-use crate::state::{
-    CompletionItem, CompletionKind, EditMode, EditorState, NodeType, to_json_pointer,
+use crate::schema_util::{
+    collect_addable_keys, collect_property_completions, detect_combo_key, find_sub_schema,
+    find_sub_schema_for_value, oneof_variants, resolve_ref, resolve_schema_type_and_default,
+    schema_type_includes,
 };
+use crate::state::{CompletionItem, CompletionKind, EditMode, EditorState, NodeType};
+use crate::util::{is_ambiguous_string, to_json_pointer};
 use serde_json::Value;
-
-/// Metadata for a oneOf/anyOf variant
-#[derive(Debug, Clone)]
-pub struct VariantMeta {
-    /// Display label for this variant
-    pub label: String,
-    /// Description for tooltip
-    pub description: Option<String>,
-    /// The primary JSON type of this variant ("string", "object", "array", etc.)
-    pub type_str: String,
-}
-
-/// Extract variant metadata from a oneOf/anyOf sub-schema.
-/// Deduplicates by primary type. If variant has `title` or `description`, uses that.
-/// Otherwise synthesizes from the type.
-pub fn oneof_variants(sub: &Value) -> Vec<VariantMeta> {
-    let combo_key = if sub.get("oneOf").is_some() {
-        "oneOf"
-    } else if sub.get("anyOf").is_some() {
-        "anyOf"
-    } else {
-        return Vec::new();
-    };
-
-    let arr = match sub.get(combo_key).and_then(|v| v.as_array()) {
-        Some(a) => a,
-        None => return Vec::new(),
-    };
-
-    let mut variants = Vec::new();
-    let mut seen_types = std::collections::HashSet::new();
-
-    for variant in arr {
-        let type_str = resolve_primary_type(variant);
-        if seen_types.contains(&type_str) {
-            continue;
-        }
-        seen_types.insert(type_str.clone());
-
-        let label = variant
-            .get("title")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-            .or_else(|| {
-                variant
-                    .get("description")
-                    .and_then(|v| v.as_str())
-                    .map(|s| {
-                        if s.len() > 40 {
-                            format!("{}...", &s[..37])
-                        } else {
-                            s.to_string()
-                        }
-                    })
-            })
-            .unwrap_or_else(|| match type_str.as_str() {
-                "string" => "String (path or URL)".to_string(),
-                "object" => "Object (detailed config)".to_string(),
-                "array" => "Array".to_string(),
-                "boolean" => "Boolean".to_string(),
-                "number" | "integer" => "Number".to_string(),
-                "null" => "Null".to_string(),
-                _ => "Value".to_string(),
-            });
-
-        let description = variant
-            .get("description")
-            .and_then(|v| v.as_str())
-            .map(|s| {
-                if s.len() > 80 {
-                    format!("{}...", &s[..77])
-                } else {
-                    s.to_string()
-                }
-            });
-
-        variants.push(VariantMeta {
-            label,
-            description,
-            type_str,
-        });
-    }
-
-    variants
-}
-
-/// Resolve the primary type string from a schema variant.
-/// Handles direct `type`, `type` arrays (picks first non-null), and falls back to "object".
-fn resolve_primary_type(schema: &Value) -> String {
-    if let Some(t) = schema.get("type") {
-        if let Some(s) = t.as_str() {
-            return s.to_string();
-        } else if let Some(arr) = t.as_array() {
-            if let Some(first) = arr.iter().find_map(|v| {
-                let s = v.as_str()?;
-                if s != "null" { Some(s) } else { None }
-            }) {
-                return first.to_string();
-            }
-        }
-    }
-
-    // Infer from shape: has "properties" or "patternProperties" → object
-    if schema.get("properties").is_some()
-        || schema.get("patternProperties").is_some()
-        || schema.get("additionalProperties").is_some()
-    {
-        return "object".to_string();
-    }
-
-    // Infer from shape: has "items" → array
-    if schema.get("items").is_some() {
-        return "array".to_string();
-    }
-
-    "object".to_string()
-}
-
-/// Value-aware schema resolver for oneOf/anyOf boundaries.
-/// Calls `find_sub_schema` to descend the path, then at each oneOf/anyOf,
-/// filters variants by the current value's type.
-pub fn find_sub_schema_for_value<'a>(
-    root: &'a Value,
-    path: &[String],
-    value: Option<&Value>,
-) -> Option<&'a Value> {
-    let sub = find_sub_schema(root, path)?;
-
-    // If no oneOf/anyOf, or value is None (unknown), use first-match as-is
-    let combo_key = if sub.get("oneOf").is_some() {
-        "oneOf"
-    } else if sub.get("anyOf").is_some() {
-        "anyOf"
-    } else {
-        return Some(sub);
-    };
-
-    let arr = match sub.get(combo_key).and_then(|v| v.as_array()) {
-        Some(a) if a.len() > 1 => a,
-        Some(a) if a.len() == 1 => {
-            // Single variant: return the variant itself, not the wrapper
-            return a.first();
-        }
-        _ => return Some(sub), // empty → no choice needed
-    };
-
-    match value {
-        Some(Value::Null) | None => {
-            // Value is null or unknown: prefer first object/array variant
-            if let Some(v) = arr
-                .iter()
-                .find(|v| matches!(resolve_primary_type(v).as_str(), "object" | "array"))
-            {
-                Some(v)
-            } else {
-                arr.first()
-            }
-        }
-        Some(val) => {
-            // Non-null value: find the variant whose type matches
-            let target_type = json_value_type(val);
-            // Prefer exact type match
-            if let Some(v) = pick_variant_by_type(arr, &target_type) {
-                Some(v)
-            } else {
-                // Fallback: first variant (existing heuristic)
-                arr.first()
-            }
-        }
-    }
-}
-
-/// Get the JSON Schema type name for a serde_json::Value
-fn json_value_type(val: &Value) -> &'static str {
-    match val {
-        Value::String(_) => "string",
-        Value::Object(_) => "object",
-        Value::Array(_) => "array",
-        Value::Number(n) => {
-            if n.is_i64() || n.is_u64() {
-                "integer"
-            } else {
-                "number"
-            }
-        }
-        Value::Bool(_) => "boolean",
-        Value::Null => "null",
-    }
-}
-
-/// Find the variant that best matches a target type.
-/// Preference: object > array > primitives.
-fn pick_variant_by_type<'a>(arr: &'a [Value], target_type: &str) -> Option<&'a Value> {
-    let mut candidates: Vec<(&Value, usize)> = arr
-        .iter()
-        .filter_map(|v| {
-            let t = resolve_primary_type(v);
-            if t == target_type {
-                Some((v, 0)) // exact match
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    if candidates.is_empty() {
-        return None;
-    }
-
-    // Sort by priority: object(0) > array(1) > primitive(2)
-    candidates.sort_by_key(|(_, _)| 0); // all same priority
-    candidates.first().map(|(v, _)| *v)
-}
 
 pub fn start_edit(state: &mut EditorState) {
     start_edit_impl(state, false);
@@ -223,32 +14,124 @@ pub fn start_edit(state: &mut EditorState) {
 pub fn start_edit_cleared(state: &mut EditorState) {
     start_edit_impl(state, true);
 }
-fn is_ambiguous_string(s: &str) -> bool {
-    let s_lower = s.to_lowercase();
-    s_lower == "true"
-        || s_lower == "false"
-        || s_lower == "null"
-        || s_lower == "~"
-        || s.parse::<i64>().is_ok()
-        || s.parse::<u64>().is_ok()
-        || s.parse::<f64>().is_ok()
+
+fn handle_enum_edit(state: &mut EditorState, path: &[String], current_value: &Value) -> bool {
+    let sub_schema = match state.schema.as_ref().and_then(|s| find_sub_schema(s, path)) {
+        Some(s) => s,
+        None => return false,
+    };
+    let enum_values = match sub_schema.get("enum").and_then(|v| v.as_array()) {
+        Some(arr) => arr,
+        None => return false,
+    };
+
+    let options: Vec<String> = enum_values
+        .iter()
+        .map(|v| v.as_str().unwrap_or(&v.to_string()).to_string())
+        .collect();
+
+    let descriptions: Vec<Option<String>> = sub_schema
+        .get("enumDescriptions")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            options
+                .iter()
+                .enumerate()
+                .map(|(i, _)| arr.get(i).and_then(|v| v.as_str()).map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_else(|| vec![None; options.len()]);
+
+    let selected = options
+        .iter()
+        .position(|opt| opt == &current_value.as_str().unwrap_or(&current_value.to_string()))
+        .unwrap_or(0);
+
+    state.edit_mode = EditMode::Dropdown {
+        options: options.clone(),
+        descriptions,
+        selected,
+        scroll_offset: 0,
+        filter_buffer: String::new(),
+        filtered_indices: (0..options.len()).collect(),
+    };
+    true
+}
+
+fn handle_oneof_variant_edit(
+    state: &mut EditorState,
+    path: &[String],
+    current_value: &Value,
+    clear_value: bool,
+) -> bool {
+    if *current_value != Value::Null || clear_value {
+        return false;
+    }
+    let sub_schema = match state.schema.as_ref().and_then(|s| find_sub_schema(s, path)) {
+        Some(s) => s,
+        None => return false,
+    };
+
+    let combo_key = match detect_combo_key(sub_schema) {
+        Some(key) if key != "allOf" => Some(key),
+        _ => None,
+    };
+    let key = match combo_key {
+        Some(k) => k,
+        None => return false,
+    };
+
+    match sub_schema.get(key).and_then(|v| v.as_array()) {
+        Some(a) if a.len() > 1 => {}
+        _ => return false,
+    };
+
+    let variants = oneof_variants(sub_schema);
+    if variants.len() <= 1 {
+        return false;
+    }
+
+    let parent_path = path[..path.len().saturating_sub(1)].to_vec();
+    let target_key = path.last().cloned().unwrap_or_default();
+    let options: Vec<String> = variants.iter().map(|v| v.label.clone()).collect();
+    let descriptions: Vec<Option<String>> =
+        variants.iter().map(|v| v.description.clone()).collect();
+    let count = options.len();
+    state.edit_mode = EditMode::OneOfVariantDropdown {
+        parent_path,
+        target_key,
+        options,
+        descriptions,
+        selected: 0,
+        scroll_offset: 0,
+        filter_buffer: String::new(),
+        cursor_pos: 0,
+        filtered_indices: (0..count).collect(),
+    };
+    true
 }
 
 fn start_edit_impl(state: &mut EditorState, clear_value: bool) {
-    let (path, node_type) = match state.selected_node() {
-        Some(n) => (n.path.clone(), n.node_type.clone()),
+    let (path, node_type, is_disabled_comment) = match state.selected_node() {
+        Some(n) => (n.path.clone(), n.node_type.clone(), n.is_disabled_comment),
         None => return,
     };
 
-    let pointer = to_json_pointer(&path);
-    let current_value = state.data.pointer(&pointer).unwrap_or(&Value::Null);
+    if is_disabled_comment {
+        return;
+    }
+
+    let current_value = state
+        .node_at_path_as_value(&path)
+        .cloned()
+        .unwrap_or(Value::Null);
 
     // Special handling for Boolean
     let is_bool = current_value.as_bool();
     if let Some(b) = is_bool.filter(|_| !clear_value) {
         state.save_to_undo();
         let new_value = Value::Bool(!b);
-        if let Some(v) = state.data.pointer_mut(&pointer) {
+        if let Some(v) = state.node_at_path_mut_value(&path) {
             *v = new_value;
         }
         state.edit_mode = EditMode::Normal;
@@ -257,93 +140,13 @@ fn start_edit_impl(state: &mut EditorState, clear_value: bool) {
     }
 
     // Check schema for enum
-    if let Some(sub_schema) = state
-        .schema
-        .as_ref()
-        .and_then(|s| find_sub_schema(s, &path))
-    {
-        if let Some(enum_values) = sub_schema.get("enum").and_then(|v| v.as_array()) {
-            let options: Vec<String> = enum_values
-                .iter()
-                .map(|v| v.as_str().unwrap_or(&v.to_string()).to_string())
-                .collect();
-
-            // Read parallel enumDescriptions array if present
-            let descriptions: Vec<Option<String>> = sub_schema
-                .get("enumDescriptions")
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    options
-                        .iter()
-                        .enumerate()
-                        .map(|(i, _)| arr.get(i).and_then(|v| v.as_str()).map(|s| s.to_string()))
-                        .collect()
-                })
-                .unwrap_or_else(|| vec![None; options.len()]);
-
-            let selected = options
-                .iter()
-                .position(|opt| {
-                    opt == &current_value.as_str().unwrap_or(&current_value.to_string())
-                })
-                .unwrap_or(0);
-
-            state.edit_mode = EditMode::Dropdown {
-                options: options.clone(),
-                descriptions,
-                selected,
-                scroll_offset: 0,
-                filter_buffer: String::new(),
-                filtered_indices: (0..options.len()).collect(),
-            };
-            return;
-        }
+    if handle_enum_edit(state, &path, &current_value) {
+        return;
     }
 
     // Check for oneOf/anyOf variant picker when value is null
-    if *current_value == Value::Null && !clear_value {
-        if let Some(sub_schema) = state
-            .schema
-            .as_ref()
-            .and_then(|s| find_sub_schema(s, &path))
-        {
-            let combo_key = if sub_schema.get("oneOf").is_some() {
-                Some("oneOf")
-            } else if sub_schema.get("anyOf").is_some() {
-                Some("anyOf")
-            } else {
-                None
-            };
-
-            if let Some(key) = combo_key {
-                if let Some(arr) = sub_schema.get(key).and_then(|v| v.as_array()) {
-                    if arr.len() > 1 {
-                        let variants = oneof_variants(sub_schema);
-                        if variants.len() > 1 {
-                            let parent_path = path[..path.len().saturating_sub(1)].to_vec();
-                            let target_key = path.last().cloned().unwrap_or_default();
-                            let options: Vec<String> =
-                                variants.iter().map(|v| v.label.clone()).collect();
-                            let descriptions: Vec<Option<String>> =
-                                variants.iter().map(|v| v.description.clone()).collect();
-                            let count = options.len();
-                            state.edit_mode = EditMode::OneOfVariantDropdown {
-                                parent_path,
-                                target_key,
-                                options,
-                                descriptions,
-                                selected: 0,
-                                scroll_offset: 0,
-                                filter_buffer: String::new(),
-                                cursor_pos: 0,
-                                filtered_indices: (0..count).collect(),
-                            };
-                            return;
-                        }
-                    }
-                }
-            }
-        }
+    if handle_oneof_variant_edit(state, &path, &current_value, clear_value) {
+        return;
     }
 
     // For other types, enter edit mode
@@ -361,7 +164,7 @@ fn start_edit_impl(state: &mut EditorState, clear_value: bool) {
                             || resolved.get("properties").is_some()
                         {
                             state.save_to_undo();
-                            if let Some(v) = state.data.pointer_mut(&to_json_pointer(&path)) {
+                            if let Some(v) = state.node_at_path_mut_value(&path) {
                                 *v = Value::Object(serde_json::Map::new());
                             }
                             state.rebuild_flattened();
@@ -376,7 +179,7 @@ fn start_edit_impl(state: &mut EditorState, clear_value: bool) {
             } else {
                 match current_value {
                     Value::String(s) => {
-                        if is_ambiguous_string(s) {
+                        if is_ambiguous_string(&s) {
                             format!("\"{}\"", s)
                         } else {
                             s.clone()
@@ -394,13 +197,11 @@ fn start_edit_impl(state: &mut EditorState, clear_value: bool) {
         _ => {
             if clear_value && path.len() > 0 {
                 let parent_path = path[..path.len() - 1].to_vec();
-                let parent_pointer = to_json_pointer(&parent_path);
                 let is_parent_object = if parent_path.is_empty() {
-                    state.data.is_object()
+                    state.nodes[state.root].value.is_object()
                 } else {
                     state
-                        .data
-                        .pointer(&parent_pointer)
+                        .node_at_path_as_value(&parent_path)
                         .map(|v| v.is_object())
                         .unwrap_or(false)
                 };
@@ -465,178 +266,6 @@ fn start_edit_impl(state: &mut EditorState, clear_value: bool) {
     }
 }
 
-/// Check if a schema's `type` field includes a given type.
-/// Handles both string (`"object"`) and array (`["object", "null"]`) forms.
-fn schema_type_includes(schema: &Value, target: &str) -> bool {
-    match schema.get("type") {
-        Some(Value::String(s)) => s == target,
-        Some(Value::Array(arr)) => arr.iter().any(|v| v.as_str() == Some(target)),
-        _ => false,
-    }
-}
-
-/// Simple JSON Schema pattern matcher for common patterns (no regex dependency).
-/// Handles: ^prefix, suffix$, ^char-class+$, ^exact$, and wildcard *.
-fn matches_pattern(pattern: &str, value: &str) -> bool {
-    // Detect anchored prefix: "^x-" (starts with ^, no trailing $)
-    let is_anchored_prefix = pattern.starts_with('^') && !pattern.ends_with('$');
-
-    let p = pattern.trim_start_matches('^').trim_end_matches('$');
-
-    if p == ".+" || p == ".*" || p == "*" {
-        return !value.is_empty() || p != ".+";
-    }
-
-    // Anchored prefix without $ → value must start with the pattern
-    if is_anchored_prefix && p != "." {
-        return value.starts_with(p);
-    }
-
-    // Prefix: "x-*" after stripping ^
-    if let Some(prefix) = p.strip_suffix('*') {
-        return value.starts_with(prefix);
-    }
-
-    // Suffix: "*.json" after stripping $
-    if let Some(suffix) = p.strip_prefix('*') {
-        return value.ends_with(suffix);
-    }
-
-    // Character class pattern like [a-zA-Z0-9._-]+
-    if let Some(chars) = parse_char_class(p) {
-        if p.ends_with('+') || p.ends_with('*') {
-            return !value.is_empty() && value.chars().all(|c| chars.contains(&c));
-        }
-        return chars.contains(&value.chars().next().unwrap_or('\0'));
-    }
-
-    // Exact match
-    value == p
-}
-
-/// Parse a simple character class like [a-zA-Z0-9._-] into a set of chars.
-fn parse_char_class(pattern: &str) -> Option<std::collections::HashSet<char>> {
-    let bracket_start = pattern.find('[')?;
-    let bracket_end = pattern.rfind(']')?;
-    if bracket_end <= bracket_start {
-        return None;
-    }
-    let inner = &pattern[bracket_start + 1..bracket_end];
-    let rest = &pattern[bracket_end + 1..];
-
-    // Must start at position 0 and rest must be empty or a quantifier
-    if bracket_start != 0 || (!rest.is_empty() && rest != "+" && rest != "*") {
-        return None;
-    }
-
-    let mut chars = std::collections::HashSet::new();
-    let chars_inner: Vec<char> = inner.chars().collect();
-    let mut i = 0;
-    while i < chars_inner.len() {
-        if i + 2 < chars_inner.len() && chars_inner[i + 1] == '-' {
-            // Range like a-z
-            let start = chars_inner[i] as u32;
-            let end = chars_inner[i + 2] as u32;
-            if start <= end {
-                for cp in start..=end {
-                    if let Some(c) = char::from_u32(cp) {
-                        chars.insert(c);
-                    }
-                }
-            }
-            i += 3;
-        } else {
-            chars.insert(chars_inner[i]);
-            i += 1;
-        }
-    }
-    Some(chars)
-}
-
-pub fn find_sub_schema<'a>(schema: &'a Value, path: &[String]) -> Option<&'a Value> {
-    find_sub_schema_recursive(schema, schema, path)
-}
-
-fn find_sub_schema_recursive<'a>(
-    root: &'a Value,
-    current: &'a Value,
-    path: &[String],
-) -> Option<&'a Value> {
-    let mut current = current;
-
-    // Resolve $ref if present
-    while let Some(ref_path) = current.get("$ref").and_then(|v| v.as_str()) {
-        if ref_path.starts_with("#/") {
-            let parts: Vec<&str> = ref_path.split('/').skip(1).collect();
-            let mut ref_node = root;
-            for part in parts {
-                // Handle JSON Pointer escaping (~1 -> /, ~0 -> ~)
-                let unescaped = part.replace("~1", "/").replace("~0", "~");
-                if let Some(next) = ref_node.get(unescaped) {
-                    ref_node = next;
-                } else {
-                    return None;
-                }
-            }
-            current = ref_node;
-        } else {
-            // Non-local refs are not supported yet without schema fetcher integration
-            break;
-        }
-    }
-
-    if path.is_empty() {
-        return Some(current);
-    }
-
-    let segment = &path[0];
-    let tail = &path[1..];
-
-    // 1. Properties
-    if let Some(props) = current.get("properties") {
-        if let Some(next) = props.get(segment) {
-            return find_sub_schema_recursive(root, next, tail);
-        }
-    }
-
-    // 2. patternProperties (e.g. compose-spec's "services", "networks", etc.)
-    if let Some(pattern_props) = current.get("patternProperties").and_then(|v| v.as_object()) {
-        for (pattern, pattern_schema) in pattern_props {
-            if matches_pattern(pattern, segment) {
-                return find_sub_schema_recursive(root, pattern_schema, tail);
-            }
-        }
-    }
-
-    // 3. additionalProperties
-    if let Some(add_props) = current.get("additionalProperties") {
-        if add_props.is_object() {
-            return find_sub_schema_recursive(root, add_props, tail);
-        }
-    }
-
-    // 4. Items (for array indexing)
-    if let Some(items) = current.get("items") {
-        // Any segment in an array path (index) maps to items schema
-        if segment.parse::<usize>().is_ok() || segment == "*" {
-            return find_sub_schema_recursive(root, items, tail);
-        }
-    }
-
-    // 5. anyOf, oneOf, allOf
-    for combo in ["anyOf", "oneOf", "allOf"] {
-        if let Some(arr) = current.get(combo).and_then(|v| v.as_array()) {
-            for sub in arr {
-                if let Some(found) = find_sub_schema_recursive(root, sub, path) {
-                    return Some(found);
-                }
-            }
-        }
-    }
-
-    None
-}
-
 pub fn get_completions_for_path(state: &EditorState, path: &[String]) -> Vec<CompletionItem> {
     let schema = match &state.schema {
         Some(s) => s,
@@ -644,8 +273,7 @@ pub fn get_completions_for_path(state: &EditorState, path: &[String]) -> Vec<Com
     };
 
     // Get the current value at this path for value-aware resolution
-    let pointer = to_json_pointer(path);
-    let current_value = state.data.pointer(&pointer);
+    let current_value = state.node_at_path_as_value(path);
 
     let sub_schema = match find_sub_schema_for_value(schema, path, current_value) {
         Some(s) => s,
@@ -699,121 +327,9 @@ pub fn get_completions_for_path(state: &EditorState, path: &[String]) -> Vec<Com
     completions
 }
 
-/// Collect property completions from a schema, recursing into oneOf/anyOf object variants.
-fn collect_property_completions(
-    root: &Value,
-    sub_schema: &Value,
-    completions: &mut Vec<CompletionItem>,
-) {
-    let resolved = resolve_ref(root, sub_schema);
-
-    // Direct object with properties
-    if schema_type_includes(resolved, "object") {
-        if let Some(props) = resolved.get("properties").and_then(|v| v.as_object()) {
-            for (key, prop_schema) in props {
-                completions.push(CompletionItem {
-                    label: key.clone(),
-                    value: prop_schema.get("default").cloned().unwrap_or(Value::Null),
-                    kind: CompletionKind::Property,
-                    detail: prop_schema
-                        .get("description")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string()),
-                });
-            }
-        }
-        // Also collect from patternProperties
-        collect_pattern_properties_completions(root, resolved, completions);
-        return;
-    }
-
-    // For oneOf/anyOf/allOf: collect from all object-typed variants
-    for combo in ["oneOf", "anyOf", "allOf"] {
-        if let Some(arr) = resolved.get(combo).and_then(|v| v.as_array()) {
-            for variant in arr {
-                let variant_resolved = resolve_ref(root, variant);
-                if schema_type_includes(variant_resolved, "object") {
-                    if let Some(props) = variant_resolved
-                        .get("properties")
-                        .and_then(|v| v.as_object())
-                    {
-                        for (key, prop_schema) in props {
-                            if !completions.iter().any(|c| c.label == *key) {
-                                completions.push(CompletionItem {
-                                    label: key.clone(),
-                                    value: prop_schema
-                                        .get("default")
-                                        .cloned()
-                                        .unwrap_or(Value::Null),
-                                    kind: CompletionKind::Property,
-                                    detail: prop_schema
-                                        .get("description")
-                                        .and_then(|v| v.as_str())
-                                        .map(|s| s.to_string()),
-                                });
-                            }
-                        }
-                    }
-                    collect_pattern_properties_completions(root, variant_resolved, completions);
-                }
-            }
-        }
-    }
-}
-
-/// Collect completions from patternProperties (e.g., compose's `networks`, `volumes`).
-/// Each pattern's schema may be a $ref that needs resolving.
-fn collect_pattern_properties_completions(
-    root: &Value,
-    schema: &Value,
-    completions: &mut Vec<CompletionItem>,
-) {
-    if let Some(pattern_props) = schema.get("patternProperties").and_then(|v| v.as_object()) {
-        for (_pattern, pattern_schema) in pattern_props {
-            let resolved = resolve_ref(root, pattern_schema);
-            if let Some(props) = resolved.get("properties").and_then(|v| v.as_object()) {
-                for (key, prop_schema) in props {
-                    if !completions.iter().any(|c| c.label == *key) {
-                        completions.push(CompletionItem {
-                            label: key.clone(),
-                            value: prop_schema.get("default").cloned().unwrap_or(Value::Null),
-                            kind: CompletionKind::Property,
-                            detail: prop_schema
-                                .get("description")
-                                .and_then(|v| v.as_str())
-                                .map(|s| s.to_string()),
-                        });
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Resolve a $ref if present, otherwise return as-is.
-fn resolve_ref<'a>(root: &'a Value, schema: &'a Value) -> &'a Value {
-    if let Some(ref_path) = schema.get("$ref").and_then(|v| v.as_str()) {
-        if ref_path.starts_with("#/") {
-            let parts: Vec<&str> = ref_path.split('/').skip(1).collect();
-            let mut ref_node = root;
-            for part in parts {
-                let unescaped = part.replace("~1", "/").replace("~0", "~");
-                if let Some(next) = ref_node.get(unescaped) {
-                    ref_node = next;
-                } else {
-                    return schema;
-                }
-            }
-            return ref_node;
-        }
-    }
-    schema
-}
-
 pub fn apply_completion(state: &mut EditorState, path: &[String], item: &CompletionItem) {
     state.save_to_undo();
-    let pointer = to_json_pointer(path);
-    if let Some(v) = state.data.pointer_mut(&pointer) {
+    if let Some(v) = state.node_at_path_mut_value(path) {
         *v = item.value.clone();
     }
     state.rebuild_flattened();
@@ -874,9 +390,8 @@ pub fn apply_oneof_variant(state: &mut EditorState) {
         p.push(target_key.clone());
         p
     };
-    let pointer = to_json_pointer(&full_path);
     state.save_to_undo();
-    if let Some(v) = state.data.pointer_mut(&pointer) {
+    if let Some(v) = state.node_at_path_mut_value(&full_path) {
         *v = placeholder;
     }
     state.rebuild_flattened();
@@ -905,72 +420,6 @@ pub fn apply_oneof_variant(state: &mut EditorState) {
     }
 }
 
-pub fn resolve_schema_type_and_default(
-    root: &Value,
-    current: &Value,
-) -> (Option<Value>, Option<String>) {
-    let mut current = current;
-
-    // Resolve $ref if present
-    while let Some(ref_path) = current.get("$ref").and_then(|v| v.as_str()) {
-        if ref_path.starts_with("#/") {
-            let parts: Vec<&str> = ref_path.split('/').skip(1).collect();
-            let mut ref_node = root;
-            let mut success = true;
-            for part in parts {
-                let unescaped = part.replace("~1", "/").replace("~0", "~");
-                if let Some(next) = ref_node.get(unescaped) {
-                    ref_node = next;
-                } else {
-                    success = false;
-                    break;
-                }
-            }
-            if success {
-                current = ref_node;
-            } else {
-                break;
-            }
-        } else {
-            break;
-        }
-    }
-
-    if let Some(def) = current.get("default") {
-        return (Some(def.clone()), None);
-    }
-
-    if let Some(t_val) = current.get("type") {
-        let t_str = if let Some(s) = t_val.as_str() {
-            Some(s.to_string())
-        } else if let Some(arr) = t_val.as_array() {
-            arr.iter()
-                .filter_map(|v| v.as_str())
-                .find(|&s| s != "null")
-                .map(|s| s.to_string())
-        } else {
-            None
-        };
-        if t_str.is_some() {
-            return (None, t_str);
-        }
-    }
-
-    // Try anyOf, oneOf, allOf
-    for combo in ["anyOf", "oneOf", "allOf"] {
-        if let Some(arr) = current.get(combo).and_then(|v| v.as_array()) {
-            for sub in arr {
-                let (def, t) = resolve_schema_type_and_default(root, sub);
-                if def.is_some() || t.is_some() {
-                    return (def, t);
-                }
-            }
-        }
-    }
-
-    (None, None)
-}
-
 fn get_default_value_from_schema(schema: &Value, path: &[String]) -> Value {
     // Use value-aware resolver with null to prefer object/array variants
     if let Some(sub) = find_sub_schema_for_value(schema, path, None) {
@@ -992,6 +441,114 @@ fn get_default_value_from_schema(schema: &Value, path: &[String]) -> Value {
     Value::Null
 }
 
+/// True when the schema at `path` resolves to type "boolean".
+fn is_boolean_schema(state: &EditorState, path: &[String]) -> bool {
+    if let Some(schema) = &state.schema {
+        if let Some(sub) = find_sub_schema(schema, path) {
+            let resolved = resolve_ref(schema, sub);
+            if let Some(t) = resolved.get("type").and_then(|v| v.as_str()) {
+                return t == "boolean";
+            }
+        }
+    }
+    false
+}
+
+/// Returns true if `parent_path` is an object that already contains `key`,
+/// excluding the placeholder key `exclude_key` (temp key or original key).
+fn key_exists_in_parent(
+    state: &EditorState,
+    parent_path: &[String],
+    key: &str,
+    exclude_key: &str,
+) -> bool {
+    if key == exclude_key {
+        return false;
+    }
+    if let Some(Value::Object(map)) = state.node_at_path_as_value(parent_path) {
+        return map.contains_key(key);
+    }
+    false
+}
+
+fn replace_key_in_json_object(parent: &mut Value, old_key: &str, new_key: &str, val: Value) {
+    if let Value::Object(map) = parent {
+        if map.remove(old_key).is_some() {
+            map.insert(new_key.to_string(), val);
+        }
+    }
+}
+
+fn rename_key_in_nodes(
+    state: &mut EditorState,
+    parent_path: Vec<String>,
+    temp_key: String,
+    key: String,
+) {
+    let val = if let Some(schema) = &state.schema {
+        let mut child_path = parent_path.clone();
+        child_path.push(key.clone());
+        get_default_value_from_schema(schema, &child_path)
+    } else {
+        Value::Null
+    };
+
+    if let Some(parent_val) = state.node_at_path_mut_value(&parent_path) {
+        replace_key_in_json_object(parent_val, &temp_key, &key, val.clone());
+    }
+
+    // Rename the key in state.nodes and state.all_nodes_cache
+    let mut old_prefix = parent_path.clone();
+    old_prefix.push(temp_key);
+
+    let mut new_prefix = parent_path.clone();
+    new_prefix.push(key.clone());
+
+    for node in &mut state.all_nodes_cache {
+        if node.path.starts_with(&old_prefix) {
+            let suffix = node.path[old_prefix.len()..].to_vec();
+            let mut new_path = new_prefix.clone();
+            new_path.extend(suffix);
+            node.path = new_path;
+        }
+    }
+
+    for node in &mut state.nodes {
+        if node.path.starts_with(&old_prefix) {
+            let suffix = node.path[old_prefix.len()..].to_vec();
+            let mut new_path = new_prefix.clone();
+            new_path.extend(suffix);
+            node.path = new_path;
+        }
+    }
+
+    if let Some(child_node) = state.node_at_path_mut(&new_prefix) {
+        child_node.value = val;
+    }
+
+    state.rebuild_flattened();
+
+    // Move cursor to the newly changed key node
+    let mut target_path = parent_path.clone();
+    target_path.push(key.clone());
+    if let Some(pos) = state
+        .flattened_nodes
+        .iter()
+        .position(|n| n.path == target_path)
+    {
+        state.selected = pos;
+        // Improvement 2: focus lands on the VALUE field.
+        // - Boolean values toggle via Enter in Normal mode, so do NOT auto-toggle
+        //   a freshly added boolean key; just land on the node.
+        // - Other types (enum/oneOf/string/number/object) open the proper editor.
+        if is_boolean_schema(state, &target_path) {
+            state.edit_mode = EditMode::Normal;
+        } else {
+            start_edit(state);
+        }
+    }
+}
+
 pub fn apply_edit(state: &mut EditorState) {
     match &state.edit_mode {
         EditMode::NewKeyDropdown {
@@ -1003,47 +560,34 @@ pub fn apply_edit(state: &mut EditorState) {
             filter_buffer,
             ..
         } => {
-            // save_to_undo has already been called in trigger_add_child
+            // save_to_undo already called in trigger_add_child
             let key = if filtered_indices.is_empty() {
                 // No match — use typed text as the key name
                 filter_buffer.clone()
             } else {
                 options[*selected].clone()
             };
+
+            if key.is_empty() {
+                state.edit_mode = EditMode::Normal;
+                state.undo();
+                state.pop_redo();
+                return;
+            }
+
+            // Improvement 1: block duplicate key, warn, do not register
+            if key_exists_in_parent(state, &parent_path, &key, &temp_key) {
+                state.edit_mode = EditMode::Normal;
+                state.undo(); // remove temp node added by trigger_add_child
+                state.pop_redo();
+                state.set_status(format!("Key '{}' already exists", key));
+                return;
+            }
+
             let parent_path = parent_path.clone();
             let temp_key = temp_key.clone();
             state.edit_mode = EditMode::Normal;
-
-            let parent_pointer = to_json_pointer(&parent_path);
-            let val = if let Some(schema) = &state.schema {
-                let mut child_path = parent_path.clone();
-                child_path.push(key.clone());
-                get_default_value_from_schema(schema, &child_path)
-            } else {
-                Value::Null
-            };
-
-            if let Some(parent) = state.data.pointer_mut(&parent_pointer) {
-                if let Value::Object(map) = parent {
-                    if let Some(_) = map.remove(&temp_key) {
-                        map.insert(key.clone(), val);
-                    }
-                }
-            }
-
-            state.rebuild_flattened();
-
-            // Move cursor to the newly changed key node
-            let mut target_path = parent_path;
-            target_path.push(key);
-            if let Some(pos) = state
-                .flattened_nodes
-                .iter()
-                .position(|n| n.path == target_path)
-            {
-                state.selected = pos;
-                start_edit(state);
-            }
+            rename_key_in_nodes(state, parent_path, temp_key, key);
             return;
         }
         EditMode::NewKeyPrompt {
@@ -1053,56 +597,23 @@ pub fn apply_edit(state: &mut EditorState) {
             ..
         } => {
             let key = buffer.trim().to_string();
-            let parent_path = parent_path.clone();
-            let temp_key = temp_key.clone();
-            state.edit_mode = EditMode::Normal;
 
-            let parent_pointer = to_json_pointer(&parent_path);
             if key.is_empty() {
-                if let Some(parent) = state.data.pointer_mut(&parent_pointer) {
-                    if let Value::Object(map) = parent {
-                        map.remove(&temp_key);
-                    }
-                }
-                state.rebuild_flattened();
-                if let Some(pos) = state
-                    .flattened_nodes
-                    .iter()
-                    .position(|n| n.path == parent_path)
-                {
-                    state.selected = pos;
-                }
+                state.edit_mode = EditMode::Normal;
+                state.undo();
+                state.pop_redo();
+            } else if key_exists_in_parent(state, &parent_path, &key, &temp_key) {
+                // Improvement 1: block duplicate key, warn, do not register
+                state.edit_mode = EditMode::Normal;
+                state.undo();
+                state.pop_redo();
+                state.set_status(format!("Key '{}' already exists", key));
             } else {
-                let val = if let Some(schema) = &state.schema {
-                    let mut child_path = parent_path.clone();
-                    child_path.push(key.clone());
-                    get_default_value_from_schema(schema, &child_path)
-                } else {
-                    Value::Null
-                };
-
-                if let Some(parent) = state.data.pointer_mut(&parent_pointer) {
-                    if let Value::Object(map) = parent {
-                        if let Some(_) = map.remove(&temp_key) {
-                            map.insert(key.clone(), val);
-                        }
-                    }
-                }
-                state.rebuild_flattened();
-
-                // Move cursor to the newly changed key node
-                let mut target_path = parent_path;
-                target_path.push(key);
-                if let Some(pos) = state
-                    .flattened_nodes
-                    .iter()
-                    .position(|n| n.path == target_path)
-                {
-                    state.selected = pos;
-                    start_edit(state);
-                }
+                let parent_path = parent_path.clone();
+                let temp_key = temp_key.clone();
+                state.edit_mode = EditMode::Normal;
+                rename_key_in_nodes(state, parent_path, temp_key, key);
             }
-            return;
         }
         EditMode::RenameKeyPrompt {
             parent_path,
@@ -1117,18 +628,15 @@ pub fn apply_edit(state: &mut EditorState) {
             let preserved_value = value.clone();
             state.edit_mode = EditMode::Normal;
 
-            state.save_to_undo();
-            let parent_pointer = to_json_pointer(&parent_path);
-
             if new_key.is_empty() {
                 // Delete the key-value pair
-                if let Some(parent) = state.data.pointer_mut(&parent_pointer) {
+                state.save_to_undo();
+                if let Some(parent) = state.node_at_path_mut_value(&parent_path) {
                     if let Value::Object(map) = parent {
                         map.remove(&original_key);
                     }
                 }
                 state.rebuild_flattened();
-                // Select the parent or adjust selection
                 if let Some(pos) = state
                     .flattened_nodes
                     .iter()
@@ -1136,12 +644,17 @@ pub fn apply_edit(state: &mut EditorState) {
                 {
                     state.selected = pos;
                 }
-            } else if new_key != original_key {
-                // Rename the key
-                if let Some(parent) = state.data.pointer_mut(&parent_pointer) {
+            } else if new_key == original_key {
+                // no-op (unchanged)
+            } else if key_exists_in_parent(state, &parent_path, &new_key, &original_key) {
+                // Improvement 1: cannot rename onto an existing key
+                state.set_status(format!("Cannot rename: key '{}' already exists", new_key));
+                // selection already restored above via edit_mode=Normal; do NOT mutate
+            } else {
+                // Rename the key (existing body, unchanged)
+                state.save_to_undo();
+                if let Some(parent) = state.node_at_path_mut_value(&parent_path) {
                     if let Value::Object(map) = parent {
-                        // To preserve order (approximately), we might need to rebuild the map
-                        // But for now, standard remove/insert is acceptable unless specific order preservation is requested
                         // Rebuild the map to preserve key order
                         let mut new_map = serde_json::Map::new();
                         for (k, v) in map.iter() {
@@ -1171,19 +684,29 @@ pub fn apply_edit(state: &mut EditorState) {
                     }
                 }
 
+                // Update paths in state.nodes (required for active_value reconstruction)
+                for node in &mut state.nodes {
+                    if node.path.starts_with(&old_prefix) {
+                        let suffix = node.path[old_prefix.len()..].to_vec();
+                        let mut new_path = new_prefix.clone();
+                        new_path.extend(suffix);
+                        node.path = new_path;
+                    }
+                }
+
                 state.rebuild_flattened();
 
                 // Track key rename in state.renamed_keys
-                let parent_pointer = to_json_pointer(&parent_path);
-                let new_key_path = if parent_pointer.is_empty() {
+                let parent_ptr_str = to_json_pointer(&parent_path);
+                let new_key_path = if parent_ptr_str.is_empty() {
                     format!("/{}", new_key)
                 } else {
-                    format!("{}/{}", parent_pointer, new_key)
+                    format!("{}/{}", parent_ptr_str, new_key)
                 };
-                let orig_key_path = if parent_pointer.is_empty() {
+                let orig_key_path = if parent_ptr_str.is_empty() {
                     format!("/{}", original_key)
                 } else {
-                    format!("{}/{}", parent_pointer, original_key)
+                    format!("{}/{}", parent_ptr_str, original_key)
                 };
                 let true_original_key = state
                     .renamed_keys
@@ -1215,9 +738,8 @@ pub fn apply_edit(state: &mut EditorState) {
         }
     };
 
-    let pointer = to_json_pointer(&path);
     state.save_to_undo();
-    let original_value = state.data.pointer(&pointer);
+    let original_value = state.node_at_path_as_value(&path);
 
     let new_value = match &state.edit_mode {
         EditMode::TextPrompt { buffer, .. } => {
@@ -1237,9 +759,9 @@ pub fn apply_edit(state: &mut EditorState) {
             // Empty buffer + null value: generate schema-aware default
             if trimmed.is_empty() && original_value.is_some_and(|v| v.is_null()) {
                 let schema_type_resolved = if let Some(schema) = &state.schema {
-                    crate::edit::resolve_schema_type_and_default(
+                    resolve_schema_type_and_default(
                         schema,
-                        crate::edit::find_sub_schema_for_value(schema, &path, Some(&Value::Null))
+                        find_sub_schema_for_value(schema, &path, Some(&Value::Null))
                             .unwrap_or(schema),
                     )
                     .1
@@ -1357,7 +879,7 @@ pub fn apply_edit(state: &mut EditorState) {
         _ => return,
     };
 
-    if let Some(v) = state.data.pointer_mut(&pointer) {
+    if let Some(v) = state.node_at_path_mut_value(&path) {
         *v = new_value;
     }
 
@@ -1367,39 +889,10 @@ pub fn apply_edit(state: &mut EditorState) {
 
 pub fn cancel_edit(state: &mut EditorState) {
     match &state.edit_mode {
-        EditMode::NewKeyDropdown {
-            parent_path,
-            temp_key,
-            ..
-        }
-        | EditMode::NewKeyPrompt {
-            parent_path,
-            temp_key,
-            ..
-        } => {
-            let parent_path = parent_path.clone();
-            let temp_key = temp_key.clone();
+        EditMode::NewKeyDropdown { .. } | EditMode::NewKeyPrompt { .. } => {
             state.edit_mode = EditMode::Normal;
-
-            let parent_pointer = to_json_pointer(&parent_path);
-            if let Some(parent) = state.data.pointer_mut(&parent_pointer) {
-                if let Value::Object(map) = parent {
-                    map.remove(&temp_key);
-                }
-            }
-            state.rebuild_flattened();
-
-            // Move cursor back to the original parent node
-            if let Some(pos) = state
-                .flattened_nodes
-                .iter()
-                .position(|n| n.path == parent_path)
-            {
-                state.selected = pos;
-            }
-
-            // Pop the Undo stack saved in trigger_add_child (since we manually restored data)
-            state.pop_undo();
+            state.undo();
+            state.pop_redo();
         }
         _ => {
             state.edit_mode = EditMode::Normal;
@@ -1416,8 +909,7 @@ pub fn get_addable_keys_with_descriptions(
     };
 
     // Get current value at this path for value-aware resolution
-    let pointer = to_json_pointer(path);
-    let current_value = state.data.pointer(&pointer);
+    let current_value = state.node_at_path_as_value(path);
 
     let sub_schema = match find_sub_schema_for_value(schema, path, current_value) {
         Some(s) => s,
@@ -1428,7 +920,7 @@ pub fn get_addable_keys_with_descriptions(
 
     // Get current keys at this path
     let current_keys: std::collections::HashSet<String> =
-        if let Some(Value::Object(map)) = state.data.pointer(&pointer) {
+        if let Some(Value::Object(map)) = state.node_at_path_as_value(path) {
             map.keys().cloned().collect()
         } else {
             std::collections::HashSet::new()
@@ -1439,62 +931,7 @@ pub fn get_addable_keys_with_descriptions(
     addable_keys
 }
 
-/// Collect addable keys from a schema, recursing into oneOf/anyOf/allOf object variants.
-/// NOTE: patternProperties are NOT included — they define value schemas for
-/// dynamic keys (e.g., compose's `networks`, `volumes`), not fixed key names.
-fn collect_addable_keys(
-    root: &Value,
-    sub_schema: &Value,
-    current_keys: &std::collections::HashSet<String>,
-    addable_keys: &mut Vec<(String, Option<String>)>,
-) {
-    let resolved = resolve_ref(root, sub_schema);
-
-    if schema_type_includes(resolved, "object") {
-        if let Some(props) = resolved.get("properties").and_then(|v| v.as_object()) {
-            for (key, prop_schema) in props {
-                if !current_keys.contains(key) && !addable_keys.iter().any(|(k, _)| k == key) {
-                    let desc = prop_schema
-                        .get("description")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string());
-                    addable_keys.push((key.clone(), desc));
-                }
-            }
-        }
-        return;
-    }
-
-    // For oneOf/anyOf/allOf: collect from all object-typed variants
-    for combo in ["oneOf", "anyOf", "allOf"] {
-        if let Some(arr) = resolved.get(combo).and_then(|v| v.as_array()) {
-            for variant in arr {
-                let variant_resolved = resolve_ref(root, variant);
-                if schema_type_includes(variant_resolved, "object") {
-                    if let Some(props) = variant_resolved
-                        .get("properties")
-                        .and_then(|v| v.as_object())
-                    {
-                        for (key, prop_schema) in props {
-                            if !current_keys.contains(key)
-                                && !addable_keys.iter().any(|(k, _)| k == key)
-                            {
-                                let desc = prop_schema
-                                    .get("description")
-                                    .and_then(|v| v.as_str())
-                                    .map(|s| s.to_string());
-                                addable_keys.push((key.clone(), desc));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
 pub fn trigger_add_child(state: &mut EditorState) {
-    state.save_to_undo();
     let (path, node_type) = match state.selected_node() {
         Some(n) => (n.path.clone(), n.node_type.clone()),
         None => return,
@@ -1521,8 +958,7 @@ pub fn trigger_add_child(state: &mut EditorState) {
 
             // Generate a unique temporary key (avoiding duplicates)
             let mut temp_key = "new_key".to_string();
-            let parent_pointer = to_json_pointer(&path);
-            if let Some(Value::Object(map)) = state.data.pointer(&parent_pointer) {
+            if let Some(Value::Object(map)) = state.node_at_path_as_value(&path) {
                 let mut count = 0;
                 while map.contains_key(&temp_key) {
                     count += 1;
@@ -1530,29 +966,8 @@ pub fn trigger_add_child(state: &mut EditorState) {
                 }
             }
 
-            // Expand the parent node and insert the temporary node
-            if let Some(parent_node) = state.flattened_nodes.iter_mut().find(|n| n.path == path) {
-                parent_node.expanded = true;
-            }
-
-            if let Some(parent) = state.data.pointer_mut(&parent_pointer) {
-                if let Value::Object(map) = parent {
-                    map.insert(temp_key.clone(), Value::Null);
-                }
-            }
-
-            state.rebuild_flattened();
-
-            // Force move the cursor to the newly created temporary node
-            let mut temp_path = path.clone();
-            temp_path.push(temp_key.clone());
-            if let Some(pos) = state
-                .flattened_nodes
-                .iter()
-                .position(|n| n.path == temp_path)
-            {
-                state.selected = pos;
-            }
+            // add_child_node handles saving to undo, updating map and nodes, expanding parent, rebuilding and selecting
+            let _ = state.add_child_node(&path, Some(temp_key.clone()), Value::Null);
 
             if !addable.is_empty() {
                 let options: Vec<String> = addable.iter().map(|(k, _)| k.clone()).collect();
@@ -1586,6 +1001,7 @@ pub fn trigger_add_child(state: &mut EditorState) {
 mod tests {
     use super::*;
     use crate::format::Format;
+    use crate::schema_util::matches_pattern;
     use serde_json::json;
 
     #[test]
@@ -1596,7 +1012,7 @@ mod tests {
         state.selected = 1; // "active"
         start_edit(&mut state);
 
-        assert_eq!(state.data["active"], false);
+        assert_eq!(state.active_value()["active"], false);
         assert_eq!(state.edit_mode, EditMode::Normal);
     }
 
@@ -1619,7 +1035,7 @@ mod tests {
 
         apply_edit(&mut state);
 
-        assert_eq!(state.data["name"], "new");
+        assert_eq!(state.active_value()["name"], "new");
         assert_eq!(state.edit_mode, EditMode::Normal);
     }
 
@@ -1667,10 +1083,10 @@ mod tests {
         apply_edit(&mut state);
 
         assert!(
-            state.data["version"].is_string(),
+            state.active_value()["version"].is_string(),
             "Should remain a string if quoted"
         );
-        assert_eq!(state.data["version"], "2.0");
+        assert_eq!(state.active_value()["version"], "2.0");
 
         start_edit(&mut state);
         if let EditMode::TextPrompt { buffer, .. } = &mut state.edit_mode {
@@ -1678,10 +1094,10 @@ mod tests {
         }
         apply_edit(&mut state);
         assert!(
-            state.data["version"].is_number(),
+            state.active_value()["version"].is_number(),
             "Should convert to number if unquoted"
         );
-        assert_eq!(state.data["version"], json!(3.0));
+        assert_eq!(state.active_value()["version"], json!(3.0));
     }
 
     #[test]
@@ -1698,8 +1114,11 @@ mod tests {
 
         apply_edit(&mut state);
 
-        assert!(state.data["count"].is_number(), "Should remain a number");
-        assert_eq!(state.data["count"], 20);
+        assert!(
+            state.active_value()["count"].is_number(),
+            "Should remain a number"
+        );
+        assert_eq!(state.active_value()["count"], 20);
     }
 
     #[test]
@@ -1776,7 +1195,7 @@ mod tests {
 
         apply_edit(&mut state);
 
-        assert_eq!(state.data["level"], "warn");
+        assert_eq!(state.active_value()["level"], "warn");
         assert_eq!(state.edit_mode, EditMode::Normal);
     }
 
@@ -1828,7 +1247,7 @@ mod tests {
         );
         state.schema = Some(schema);
 
-        let completions = state.get_completions_for_path(&["level".to_string()]);
+        let completions = state.completions_for_path(&["level".to_string()]);
         assert_eq!(completions.len(), 3);
         assert_eq!(completions[0].label, "info");
         assert_eq!(completions[0].kind, CompletionKind::Enum);
@@ -1854,8 +1273,8 @@ mod tests {
         apply_edit(&mut state);
 
         // Should be string because schema says so, even if "1.0" looks like a number
-        assert!(state.data["version"].is_string());
-        assert_eq!(state.data["version"], "1.0");
+        assert!(state.active_value()["version"].is_string());
+        assert_eq!(state.active_value()["version"], "1.0");
     }
 
     #[test]
@@ -1921,7 +1340,7 @@ mod tests {
         start_edit(&mut state);
 
         // It should toggle straight to false, rather than entering EditMode::Dropdown
-        assert_eq!(state.data["active"], false);
+        assert_eq!(state.active_value()["active"], false);
         assert_eq!(state.edit_mode, EditMode::Normal);
     }
 
@@ -1939,11 +1358,11 @@ mod tests {
         };
         apply_edit(&mut state);
         assert!(
-            state.data["a"].is_array(),
+            state.active_value()["a"].is_array(),
             "Should be array but was {:?}",
-            state.data["a"]
+            state.active_value()["a"]
         );
-        assert_eq!(state.data["a"], json!([]));
+        assert_eq!(state.active_value()["a"], json!([]));
 
         // Edit "b" (string) to "{}"
         state.selected = 2; // "b"
@@ -1953,11 +1372,11 @@ mod tests {
         };
         apply_edit(&mut state);
         assert!(
-            state.data["b"].is_object(),
+            state.active_value()["b"].is_object(),
             "Should be object but was {:?}",
-            state.data["b"]
+            state.active_value()["b"]
         );
-        assert_eq!(state.data["b"], json!({}));
+        assert_eq!(state.active_value()["b"], json!({}));
     }
 
     #[test]
@@ -1973,8 +1392,8 @@ mod tests {
             cursor_pos: 7,
         };
         apply_edit(&mut state);
-        assert!(state.data["a"].is_string());
-        assert_eq!(state.data["a"], json!("false"));
+        assert!(state.active_value()["a"].is_string());
+        assert_eq!(state.active_value()["a"], json!("false"));
 
         // Edit "b" to "\"true\"" -> stays string "true"
         state.selected = 2; // "b"
@@ -1983,8 +1402,8 @@ mod tests {
             cursor_pos: 6,
         };
         apply_edit(&mut state);
-        assert!(state.data["b"].is_string());
-        assert_eq!(state.data["b"], json!("true"));
+        assert!(state.active_value()["b"].is_string());
+        assert_eq!(state.active_value()["b"], json!("true"));
 
         // Edit "a" (now string "false") to "true" (unquoted) -> becomes boolean true
         state.selected = 1;
@@ -1994,8 +1413,8 @@ mod tests {
             cursor_pos: 4,
         };
         apply_edit(&mut state);
-        assert!(state.data["a"].is_boolean());
-        assert_eq!(state.data["a"], json!(true));
+        assert!(state.active_value()["a"].is_boolean());
+        assert_eq!(state.active_value()["a"], json!(true));
     }
 
     #[test]
@@ -2011,8 +1430,8 @@ mod tests {
             cursor_pos: 7,
         };
         apply_edit(&mut state);
-        assert!(state.data["a"].is_string());
-        assert_eq!(state.data["a"], json!("false"));
+        assert!(state.active_value()["a"].is_string());
+        assert_eq!(state.active_value()["a"], json!("false"));
     }
 
     #[test]
@@ -2385,7 +1804,7 @@ mod tests {
         let mut state = EditorState::new(data, crate::format::Format::Json, None, None);
         state.schema = Some(schema);
 
-        let completions = state.get_completions_for_path(&["build".to_string()]);
+        let completions = state.completions_for_path(&["build".to_string()]);
         let labels: Vec<String> = completions.iter().map(|c| c.label.clone()).collect();
         assert!(labels.contains(&"context".to_string()));
         assert!(labels.contains(&"dockerfile".to_string()));
@@ -2412,7 +1831,7 @@ mod tests {
         let mut state = EditorState::new(data, crate::format::Format::Json, None, None);
         state.schema = Some(schema);
 
-        let completions = state.get_completions_for_path(&["build".to_string()]);
+        let completions = state.completions_for_path(&["build".to_string()]);
         // String variant has no properties → should be empty
         assert!(completions.is_empty());
     }
@@ -2476,7 +1895,7 @@ mod tests {
             ]
         });
         let value = Value::String("hello".to_string());
-        let hint = crate::render::extract_type_hint_for_value(&schema, Some(&value));
+        let hint = crate::schema_util::extract_type_hint_for_value(&schema, Some(&value));
         assert_eq!(hint, " [String]");
     }
 
@@ -2489,7 +1908,7 @@ mod tests {
             ]
         });
         let value = Value::Object(serde_json::Map::new());
-        let hint = crate::render::extract_type_hint_for_value(&schema, Some(&value));
+        let hint = crate::schema_util::extract_type_hint_for_value(&schema, Some(&value));
         assert_eq!(hint, " [Object]");
     }
 
@@ -2501,7 +1920,7 @@ mod tests {
                 { "type": "object" }
             ]
         });
-        let hint = crate::render::extract_type_hint_for_value(&schema, Some(&Value::Null));
+        let hint = crate::schema_util::extract_type_hint_for_value(&schema, Some(&Value::Null));
         assert_eq!(hint, " [Union]");
     }
 
@@ -2575,7 +1994,7 @@ mod tests {
 
         apply_oneof_variant(&mut state);
 
-        assert_eq!(state.data["build"], "");
+        assert_eq!(state.active_value()["build"], "");
         assert!(matches!(state.edit_mode, EditMode::TextPrompt { .. }));
     }
 
@@ -2613,8 +2032,197 @@ mod tests {
 
         apply_oneof_variant(&mut state);
 
-        assert!(state.data["build"].is_object());
-        assert!(state.data["build"].as_object().unwrap().is_empty());
+        assert!(state.active_value()["build"].is_object());
+        assert!(
+            state.active_value()["build"]
+                .as_object()
+                .unwrap()
+                .is_empty()
+        );
         assert!(matches!(state.edit_mode, EditMode::Normal));
+    }
+
+    // ===== Duplicate-key guard tests =====
+
+    #[test]
+    fn test_duplicate_add_blocked_no_schema() {
+        // Object {"abc": null}; trigger_add_child on root, then apply key "abc" → blocked
+        let data = json!({"abc": null});
+        let mut state = EditorState::new(data, Format::Json, None, None);
+        state.selected = 0; // root object
+        trigger_add_child(&mut state);
+        // Set buffer to duplicate key "abc"
+        if let EditMode::NewKeyPrompt { buffer, .. } = &mut state.edit_mode {
+            buffer.push_str("abc");
+        } else {
+            panic!("Expected NewKeyPrompt after trigger_add_child on object without schema");
+        }
+        apply_edit(&mut state);
+        // Verify: still Normal, one key only, status message set
+        assert!(matches!(state.edit_mode, EditMode::Normal));
+        let active = state.active_value();
+        let obj = active.as_object().unwrap();
+        assert_eq!(obj.len(), 1);
+        assert!(obj.contains_key("abc"));
+        assert!(state.status_message.is_some());
+        let msg = state
+            .status_message
+            .as_ref()
+            .map(|(s, _)| s.as_str())
+            .unwrap_or("");
+        assert!(
+            msg.contains("already exists"),
+            "Status should warn about duplicate: {:?}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_duplicate_add_blocked_with_schema() {
+        // Schema allows "abc" as addable; add "abc" twice → second warns
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "abc": { "type": "string" },
+                "xyz": { "type": "string" }
+            }
+        });
+        let data = json!({"abc": "existing"});
+        let mut state = EditorState::new(data, Format::Json, None, None);
+        state.schema = Some(schema);
+        state.selected = 0; // root object
+        trigger_add_child(&mut state);
+        // Should enter NewKeyDropdown (schema has addable keys)
+        match &mut state.edit_mode {
+            EditMode::NewKeyDropdown {
+                options,
+                filter_buffer,
+                filtered_indices,
+                ..
+            } => {
+                // Filter to "abc" to select it
+                filter_buffer.push_str("abc");
+                // Rebuild filtered_indices to match "abc"
+                let new_filtered: Vec<usize> = options
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, opt)| opt.to_lowercase().contains("abc"))
+                    .map(|(i, _)| i)
+                    .collect();
+                *filtered_indices = new_filtered;
+                // Apply — should be blocked because "abc" already exists
+            }
+            _ => panic!("Expected NewKeyDropdown with schema"),
+        }
+        apply_edit(&mut state);
+        assert!(matches!(state.edit_mode, EditMode::Normal));
+        let active = state.active_value();
+        let obj = active.as_object().unwrap();
+        assert_eq!(obj.len(), 1);
+        assert!(obj.contains_key("abc"));
+        assert!(state.status_message.is_some());
+        let msg = state
+            .status_message
+            .as_ref()
+            .map(|(s, _)| s.as_str())
+            .unwrap_or("");
+        assert!(msg.contains("already exists"));
+    }
+
+    #[test]
+    fn test_unique_key_focuses_value() {
+        // Empty object {}; add unique key "x" → selected on new node
+        let data = json!({});
+        let mut state = EditorState::new(data, Format::Json, None, None);
+        state.selected = 0; // root object
+        trigger_add_child(&mut state);
+        // Set buffer to unique key "x"
+        if let EditMode::NewKeyPrompt { buffer, .. } = &mut state.edit_mode {
+            buffer.push('x');
+        } else {
+            panic!("Expected NewKeyPrompt for empty object without schema");
+        }
+        apply_edit(&mut state);
+        // Verify the key "x" was added
+        let active = state.active_value();
+        let obj = active.as_object().unwrap();
+        assert!(obj.contains_key("x"));
+        // Verify selected points at the new key node
+        let selected_path = &state.flattened_nodes[state.selected].path;
+        assert_eq!(selected_path, &vec!["x".to_string()]);
+    }
+
+    #[test]
+    fn test_boolean_key_no_auto_flip() {
+        // Schema x: {type: boolean}; add "x" → value stays false, Normal mode
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "x": { "type": "boolean" }
+            }
+        });
+        let data = json!({});
+        let mut state = EditorState::new(data, Format::Json, None, None);
+        state.schema = Some(schema);
+        state.selected = 0; // root
+        trigger_add_child(&mut state);
+        // With schema having addable "x", it enters NewKeyDropdown
+        match &mut state.edit_mode {
+            EditMode::NewKeyDropdown {
+                options,
+                filtered_indices,
+                ..
+            } => {
+                // Select "x" (it's the only option)
+                let idx = options
+                    .iter()
+                    .position(|o| o == "x")
+                    .expect("x should be in options");
+                filtered_indices.clear();
+                filtered_indices.push(idx);
+                // Need to update selected to point to the right index in filtered_indices
+            }
+            other => panic!("Expected NewKeyDropdown with schema, got {:?}", other),
+        }
+        // Set selected to 0 (index into filtered_indices which has one entry)
+        if let EditMode::NewKeyDropdown { selected, .. } = &mut state.edit_mode {
+            *selected = 0;
+        }
+        apply_edit(&mut state);
+        // Verify value is false (not auto-toggled to true)
+        let active = state.active_value();
+        let obj = active.as_object().unwrap();
+        assert_eq!(obj.get("x"), Some(&json!(false)));
+        // Verify mode is Normal (boolean → no auto-edit)
+        assert!(matches!(state.edit_mode, EditMode::Normal));
+    }
+
+    #[test]
+    fn test_rename_key_prompt_blocks_duplicate() {
+        // Object {"a":1,"b":2}; rename a→b → warns, b unchanged
+        let data = json!({"a": 1, "b": 2});
+        let mut state = EditorState::new(data, Format::Json, None, None);
+        state.selected = 1; // "a"
+        state.edit_mode = EditMode::RenameKeyPrompt {
+            parent_path: vec![],
+            original_key: "a".to_string(),
+            buffer: "b".to_string(),
+            cursor_pos: 1,
+            value: json!(1),
+        };
+        apply_edit(&mut state);
+        // Should be blocked
+        assert!(matches!(state.edit_mode, EditMode::Normal));
+        let active = state.active_value();
+        let obj = active.as_object().unwrap();
+        assert_eq!(obj.get("b"), Some(&json!(2)), "b should be unchanged");
+        assert!(obj.contains_key("a"), "a should still exist");
+        assert!(state.status_message.is_some());
+        let msg = state
+            .status_message
+            .as_ref()
+            .map(|(s, _)| s.as_str())
+            .unwrap_or("");
+        assert!(msg.contains("already exists"));
     }
 }

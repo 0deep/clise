@@ -1,0 +1,12 @@
+id: C3.3
+title: Add new item when first saved item is commented (path collision regression)
+fixture: fixtures/c3_precomment.yaml
+size: 140x40
+keys: Down Enter type:date Enter s
+expect_contains:
+  # - apple
+  - banana
+  - cherry
+  - date
+expect_not_contains:
+  cherrydate

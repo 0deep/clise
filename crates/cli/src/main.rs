@@ -291,15 +291,14 @@ async fn run_app(
 
                     match action {
                         Action::Quit => break,
-                        Action::Save { data, format } => {
+                        Action::Save { format } => {
                             let mut s = state.lock().await;
                             let filename = s.filename.clone();
                             if let Some(path) = filename {
-                                match clise_core::format::serialize_with_renames(&data, format, s.original_text.as_deref(), s.key_order_changed, &s.renamed_keys) {
-                                    Ok(serialized) => {
-                                        match std::fs::write(&path, &serialized) {
+                                match clise_core::format::serialize_annotated(&s.nodes, s.root, format) {
+                                    Ok(_serialized) => {
+                                        match std::fs::write(&path, &_serialized) {
                                             Ok(_) => {
-                                                s.original_text = Some(serialized.clone());
                                                 s.set_status(format!("Saved to {}", path));
                                                 s.on_save();
                                             }
@@ -309,9 +308,8 @@ async fn run_app(
                                     Err(e) => s.set_status(format!("Serialization error: {}", e)),
                                 }
                             } else {
-                                match clise_core::format::serialize_with_renames(&data, format, s.original_text.as_deref(), s.key_order_changed, &s.renamed_keys) {
-                                    Ok(serialized) => {
-                                        s.original_text = Some(serialized.clone());
+                                match clise_core::format::serialize_annotated(&s.nodes, s.root, format) {
+                                    Ok(_serialized) => {
                                         s.set_status("Saved (will output on exit)".to_string());
                                         s.on_save();
                                         has_saved = true;
@@ -320,15 +318,14 @@ async fn run_app(
                                 }
                             }
                         }
-                        Action::SaveAndQuit { data, format } => {
+                        Action::SaveAndQuit { format } => {
                             let mut s = state.lock().await;
                             let filename = s.filename.clone();
                             if let Some(path) = filename {
-                                match clise_core::format::serialize_with_renames(&data, format, s.original_text.as_deref(), s.key_order_changed, &s.renamed_keys) {
-                                    Ok(serialized) => {
-                                        match std::fs::write(&path, &serialized) {
+                                match clise_core::format::serialize_annotated(&s.nodes, s.root, format) {
+                                    Ok(_serialized) => {
+                                        match std::fs::write(&path, &_serialized) {
                                             Ok(_) => {
-                                                // Successfully saved, exit loop
                                                 break;
                                             }
                                             Err(e) => s.set_status(format!("Save error: {}", e)),
@@ -337,9 +334,8 @@ async fn run_app(
                                     Err(e) => s.set_status(format!("Serialization error: {}", e)),
                                 }
                             } else {
-                                match clise_core::format::serialize_with_renames(&data, format, s.original_text.as_deref(), s.key_order_changed, &s.renamed_keys) {
-                                    Ok(serialized) => {
-                                        s.original_text = Some(serialized.clone());
+                                match clise_core::format::serialize_annotated(&s.nodes, s.root, format) {
+                                    Ok(_serialized) => {
                                         s.on_save();
                                         has_saved = true;
                                         break;
@@ -357,7 +353,10 @@ async fn run_app(
 
     let s = state.lock().await;
     let output_text = if filename.is_none() && has_saved {
-        s.original_text.clone()
+        match clise_core::format::serialize_annotated(&s.nodes, s.root, format) {
+            Ok(txt) => Some(txt),
+            Err(_) => Some(s.active_value().to_string()),
+        }
     } else {
         None
     };

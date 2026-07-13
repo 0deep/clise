@@ -1,4 +1,6 @@
 use crate::format::Format;
+use crate::node::{AnnotatedNode, find_node_by_path, nodes_to_active_value};
+use crate::util::char_to_byte_index;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -41,6 +43,12 @@ pub struct UiNode {
     pub node_type: NodeType,
     /// Expansion state
     pub expanded: bool,
+    /// Whether this node represents a commented-out code (DisabledCode)
+    pub is_disabled_comment: bool,
+    /// Whether this node has any comments (above, inline, or disabled)
+    pub has_comment: bool,
+    /// Preview text of the first comment (above or inline), stripped of markers
+    pub comment_preview: Option<String>,
 }
 
 /// Helper struct for searching
@@ -163,19 +171,21 @@ pub enum SchemaState {
 /// History entry for Undo/Redo
 #[derive(Clone)]
 struct HistoryEntry {
-    data: Value,
+    nodes: Vec<AnnotatedNode>,
+    root: usize,
     selected: usize,
-    original_text: Option<String>,
     key_order_changed: bool,
     renamed_keys: std::collections::HashMap<String, String>,
 }
 
 /// Full state of the editor
 pub struct EditorState {
-    /// Original data tree
-    pub data: Value,
-    /// Backup of original data tree to detect modifications
-    pub original_data: Value,
+    /// Root node index into `nodes` (usually 0).
+    pub root: usize,
+    /// Integrated node vec (active + disabled + comments).
+    pub nodes: Vec<AnnotatedNode>,
+    /// Snapshot for dirty detection (compared to `nodes`).
+    pub original_nodes: Vec<AnnotatedNode>,
     /// Flattened view for rendering and cursor navigation
     pub flattened_nodes: Vec<UiNode>,
     /// Cursor position
@@ -210,8 +220,6 @@ pub struct EditorState {
     pub is_dirty: bool,
     /// Actual height of the current rendering area (used for PgUp/PgDn scrolling)
     pub viewport_height: usize,
-    /// Raw original file content to preserve comments
-    pub original_text: Option<String>,
     /// Track if the user explicitly changed the key order (e.g. via Ctrl+Up/Down)
     pub key_order_changed: bool,
     /// Last time the cursor was moved or text was changed (for blink reset)
@@ -234,10 +242,8 @@ pub struct EditorState {
     pub(crate) all_nodes_cache: Vec<UiNode>,
     /// Last time backspace was pressed (to prevent accidental rename prompt)
     pub last_backspace_time: Option<std::time::Instant>,
-    /// Scroll offset of the active schema description tooltip
-    pub tooltip_scroll_offset: usize,
-    /// Area of the currently rendered tooltip (if active)
-    pub tooltip_area: Option<ratatui::layout::Rect>,
+    /// Tooltip state (scroll offset, area, max width)
+    pub tooltip: crate::tooltip::TooltipState,
     /// Area of the currently rendered dropdown menu (if active)
     pub dropdown_area: Option<ratatui::layout::Rect>,
 }
@@ -249,9 +255,22 @@ impl EditorState {
         filename: Option<String>,
         original_text: Option<String>,
     ) -> Self {
+        // Compose bridge: original_text Some → parse_annotated; None → value_to_annotated.
+        let (nodes, root) = if let Some(text) = original_text.as_deref() {
+            match crate::format::parse_annotated(text, format) {
+                Ok(r) => r,
+                Err(_) => crate::format::value_to_annotated(&data),
+            }
+        } else {
+            crate::format::value_to_annotated(&data)
+        };
+
+        let original_nodes = nodes.clone();
+
         let mut state = Self {
-            data: data.clone(),
-            original_data: data,
+            root,
+            nodes,
+            original_nodes,
             flattened_nodes: Vec::new(),
             selected: 0,
             scroll_offset: 0,
@@ -269,7 +288,6 @@ impl EditorState {
             redo_stack: Vec::new(),
             is_dirty: false,
             viewport_height: 10,
-            original_text,
             key_order_changed: false,
             last_cursor_activity: std::time::Instant::now(),
             search_query: None,
@@ -281,12 +299,37 @@ impl EditorState {
             dropdown_visible_items: 10,
             all_nodes_cache: Vec::new(),
             last_backspace_time: None,
-            tooltip_scroll_offset: 0,
-            tooltip_area: None,
+            tooltip: crate::tooltip::TooltipState::new(),
             dropdown_area: None,
         };
         state.rebuild_flattened();
         state
+    }
+
+    /// Look up an AnnotatedNode by JSON path. Returns None if path not found.
+    pub fn node_at_path(&self, path: &[String]) -> Option<&AnnotatedNode> {
+        find_node_by_path(&self.nodes, path).map(|idx| &self.nodes[idx])
+    }
+
+    /// Mutable lookup by path.
+    pub fn node_at_path_mut(&mut self, path: &[String]) -> Option<&mut AnnotatedNode> {
+        find_node_by_path(&self.nodes, path).and_then(move |idx| self.nodes.get_mut(idx))
+    }
+
+    /// Thin bridge for legacy `self.data.pointer(&ptr)` callers. Returns the
+    /// node's `value` regardless of `is_active`.
+    pub fn node_at_path_as_value(&self, path: &[String]) -> Option<&Value> {
+        self.node_at_path(path).map(|n| &n.value)
+    }
+
+    /// Mutable value bridge.
+    pub fn node_at_path_mut_value(&mut self, path: &[String]) -> Option<&mut Value> {
+        self.node_at_path_mut(path).map(|n| &mut n.value)
+    }
+
+    /// Reconstruct the active-only Value tree (for jsonschema validation etc).
+    pub fn active_value(&self) -> Value {
+        nodes_to_active_value(&self.nodes, self.root)
     }
 
     /// Scroll the viewport by delta lines without moving the cursor.
@@ -304,6 +347,21 @@ impl EditorState {
         }
     }
 
+    fn calculate_type_hint_width(&self, node: &UiNode) -> u16 {
+        if !self.show_type_hints {
+            return 0;
+        }
+        let Some(schema) = &self.schema else { return 0 };
+        let Some(sub) = crate::schema_util::find_sub_schema(schema, &node.path) else {
+            return 0;
+        };
+        let type_hint_text = crate::schema_util::extract_type_hint_for_value(
+            sub,
+            self.node_at_path_as_value(&node.path),
+        );
+        unicode_width::UnicodeWidthStr::width(type_hint_text.as_str()) as u16
+    }
+
     /// Given a y offset relative to the list area top, return the flattened node index.
     pub fn node_index_at_y(&self, y: usize, list_area: ratatui::layout::Rect) -> Option<usize> {
         let mut current_y: usize = 0;
@@ -315,20 +373,7 @@ impl EditorState {
                     let x_offset = (node.depth as u16).saturating_mul(2);
                     let actual_key_len =
                         unicode_width::UnicodeWidthStr::width(node.key.as_str()) as u16;
-                    let mut type_hint_width = 0;
-                    if self.show_type_hints {
-                        if let Some(schema) = &self.schema {
-                            if let Some(sub) = crate::edit::find_sub_schema(schema, &node.path) {
-                                let node_pointer = to_json_pointer(&node.path);
-                                let node_value = self.data.pointer(&node_pointer);
-                                let type_hint_text =
-                                    crate::render::extract_type_hint_for_value(sub, node_value);
-                                type_hint_width =
-                                    unicode_width::UnicodeWidthStr::width(type_hint_text.as_str())
-                                        as u16;
-                            }
-                        }
-                    }
+                    let type_hint_width = self.calculate_type_hint_width(node);
                     let colon_x = list_area
                         .x
                         .saturating_add(x_offset)
@@ -359,19 +404,25 @@ impl EditorState {
                         }
                     }
 
-                    if let Some(schema) = &self.schema {
-                        if let Some(sub) = crate::edit::find_sub_schema(schema, &node.path) {
-                            if let Some(desc) = crate::render::extract_description(sub) {
-                                let node_x = list_area.x.saturating_add(x_offset);
-                                let max_tip_width = list_area
-                                    .right()
-                                    .saturating_sub(node_x)
-                                    .saturating_sub(2)
-                                    .clamp(20, 60);
-                                let tip_lines =
-                                    crate::render::wrap_text(&desc, max_tip_width as usize).len();
-                                let display_lines = tip_lines.min(8);
-                                node_height += display_lines + 2;
+                    if node.depth > 0 {
+                        if let Some(schema) = &self.schema {
+                            if let Some(sub) =
+                                crate::schema_util::find_sub_schema(schema, &node.path)
+                            {
+                                if let Some(desc) = crate::schema_util::extract_description(sub) {
+                                    let node_x = list_area.x.saturating_add(x_offset);
+                                    let max_tip_width = list_area
+                                        .right()
+                                        .saturating_sub(node_x)
+                                        .saturating_sub(2)
+                                        .clamp(20, 60);
+                                    let tip_lines = crate::tooltip::count_markdown_lines(
+                                        &desc,
+                                        max_tip_width as usize,
+                                    );
+                                    let display_lines = tip_lines.min(8);
+                                    node_height += display_lines + 2;
+                                }
                             }
                         }
                     }
@@ -410,7 +461,7 @@ impl EditorState {
             }
         }
 
-        if let Some(tip_area) = self.tooltip_area {
+        if let Some(tip_area) = self.tooltip.area {
             if x >= tip_area.x
                 && x < tip_area.x.saturating_add(tip_area.width)
                 && y >= tip_area.y
@@ -471,17 +522,8 @@ impl EditorState {
 
         // Calculate type hint width
         let mut type_hint_width = 0;
-        if self.show_type_hints && !is_editing_key {
-            if let Some(schema) = &self.schema {
-                if let Some(sub) = crate::edit::find_sub_schema(schema, &node.path) {
-                    let node_pointer = to_json_pointer(&node.path);
-                    let node_value = self.data.pointer(&node_pointer);
-                    let type_hint_text =
-                        crate::render::extract_type_hint_for_value(sub, node_value);
-                    type_hint_width =
-                        unicode_width::UnicodeWidthStr::width(type_hint_text.as_str()) as u16;
-                }
-            }
+        if !is_editing_key {
+            type_hint_width = self.calculate_type_hint_width(node);
         }
 
         let colon_x = key_x
@@ -572,7 +614,7 @@ impl EditorState {
                 ..
             } => {
                 if visible_index < filtered_indices.len() {
-                    self.tooltip_scroll_offset = 0;
+                    self.tooltip.reset_scroll();
                     *selected = visible_index;
                     return true;
                 }
@@ -608,7 +650,7 @@ impl EditorState {
                 if total == 0 {
                     return false;
                 }
-                self.tooltip_scroll_offset = 0;
+                self.tooltip.reset_scroll();
                 let visible = self.dropdown_visible_items;
                 if delta > 0 {
                     *selected = (*selected + delta as usize).min(total - 1);
@@ -628,29 +670,30 @@ impl EditorState {
     }
 
     pub fn is_node_modified(&self, path: &[String]) -> bool {
-        let pointer = to_json_pointer(path);
-        let current_val = match self.data.pointer(&pointer) {
-            Some(v) => v,
+        let curr = match self.node_at_path(path) {
+            Some(n) => n,
             None => return false,
         };
-        let original_val = match self.original_data.pointer(&pointer) {
-            Some(v) => v,
+        let orig = match find_node_by_path(&self.original_nodes, path) {
+            Some(i) => &self.original_nodes[i],
             None => return true,
         };
-
-        match (current_val, original_val) {
-            (Value::Object(curr_map), Value::Object(orig_map)) => {
-                let curr_keys: Vec<_> = curr_map.keys().collect();
-                let orig_keys: Vec<_> = orig_map.keys().collect();
-                curr_keys != orig_keys
+        if curr.is_active != orig.is_active {
+            return true;
+        }
+        match (&curr.value, &orig.value) {
+            (Value::Object(c), Value::Object(o)) => {
+                let ck: Vec<_> = c.keys().collect();
+                let ok: Vec<_> = o.keys().collect();
+                ck != ok
             }
-            (Value::Array(curr_arr), Value::Array(orig_arr)) => curr_arr.len() != orig_arr.len(),
-            (curr, orig) => curr != orig,
+            (Value::Array(c), Value::Array(o)) => c.len() != o.len(),
+            (c, o) => c != o,
         }
     }
 
     pub fn on_save(&mut self) {
-        self.original_data = self.data.clone();
+        self.original_nodes = self.nodes.clone();
         self.is_dirty = false;
         self.key_order_changed = false;
     }
@@ -662,9 +705,9 @@ impl EditorState {
     /// Save the current state to the Undo stack
     pub fn save_to_undo(&mut self) {
         self.undo_stack.push(HistoryEntry {
-            data: self.data.clone(),
+            nodes: self.nodes.clone(),
+            root: self.root,
             selected: self.selected,
-            original_text: self.original_text.clone(),
             key_order_changed: self.key_order_changed,
             renamed_keys: self.renamed_keys.clone(),
         });
@@ -681,27 +724,32 @@ impl EditorState {
         }
     }
 
+    /// Pop the top entry of the Redo stack
+    pub fn pop_redo(&mut self) {
+        self.redo_stack.pop();
+    }
+
     /// Undo to the previous state
     pub fn undo(&mut self) {
         if let Some(entry) = self.undo_stack.pop() {
             // Save the current state to the Redo stack
             self.redo_stack.push(HistoryEntry {
-                data: self.data.clone(),
+                nodes: self.nodes.clone(),
+                root: self.root,
                 selected: self.selected,
-                original_text: self.original_text.clone(),
                 key_order_changed: self.key_order_changed,
                 renamed_keys: self.renamed_keys.clone(),
             });
 
-            let old_data = self.data.clone();
+            let old_nodes = self.nodes.clone();
 
             // Restore state
-            self.data = entry.data;
+            self.nodes = entry.nodes;
+            self.root = entry.root;
             self.selected = entry.selected;
-            self.original_text = entry.original_text;
             self.key_order_changed = entry.key_order_changed;
             self.renamed_keys = entry.renamed_keys;
-            self.rebuild_flattened_impl(Some(&old_data));
+            self.rebuild_flattened_impl(Some(&old_nodes));
             self.set_status("Undo".to_string());
 
             if self.undo_stack.is_empty() {
@@ -715,68 +763,121 @@ impl EditorState {
         if let Some(entry) = self.redo_stack.pop() {
             // Save the current state to the Undo stack
             self.undo_stack.push(HistoryEntry {
-                data: self.data.clone(),
+                nodes: self.nodes.clone(),
+                root: self.root,
                 selected: self.selected,
-                original_text: self.original_text.clone(),
                 key_order_changed: self.key_order_changed,
                 renamed_keys: self.renamed_keys.clone(),
             });
 
-            let old_data = self.data.clone();
+            let old_nodes = self.nodes.clone();
 
             // Restore state
-            self.data = entry.data;
+            self.nodes = entry.nodes;
+            self.root = entry.root;
             self.selected = entry.selected;
-            self.original_text = entry.original_text;
             self.key_order_changed = entry.key_order_changed;
             self.renamed_keys = entry.renamed_keys;
-            self.rebuild_flattened_impl(Some(&old_data));
+            self.rebuild_flattened_impl(Some(&old_nodes));
             self.set_status("Redo".to_string());
             self.is_dirty = true;
         }
     }
 
+    fn sync_value_from_active_children(&mut self, idx: usize) {
+        let rebuilt = match &self.nodes[idx].value {
+            Value::Object(_) => {
+                let mut map = serde_json::Map::new();
+                for &ci in &self.nodes[idx].children {
+                    let c = match self.nodes.get(ci) {
+                        Some(c) => c,
+                        None => continue,
+                    };
+                    if c.is_active {
+                        if let Some(k) = c.path.last() {
+                            map.insert(k.clone(), c.value.clone());
+                        }
+                    }
+                }
+                Value::Object(map)
+            }
+            Value::Array(_) => {
+                let mut arr = Vec::new();
+                for &ci in &self.nodes[idx].children {
+                    let c = match self.nodes.get(ci) {
+                        Some(c) => c,
+                        None => continue,
+                    };
+                    if c.is_active {
+                        arr.push(c.value.clone());
+                    }
+                }
+                Value::Array(arr)
+            }
+            other => other.clone(),
+        };
+        self.nodes[idx].value = rebuilt;
+    }
+
     pub fn delete_node(&mut self, path: &[String]) -> Result<(), String> {
-        self.save_to_undo();
         if path.is_empty() {
             return Err("Cannot delete root node".to_string());
         }
-
-        // Find parent and remove child
+        self.save_to_undo();
         let parent_path = &path[..path.len() - 1];
         let child_key = &path[path.len() - 1];
-
-        let parent_pointer = to_json_pointer(parent_path);
-        if let Some(parent) = self.data.pointer_mut(&parent_pointer) {
-            match parent {
-                Value::Object(map) => {
-                    map.remove(child_key);
-                }
-                Value::Array(arr) => {
-                    if let Ok(idx) = child_key.parse::<usize>() {
-                        if idx < arr.len() {
-                            arr.remove(idx);
-                        } else {
-                            return Err(format!("Array index out of bounds: {}", idx));
-                        }
-                    } else {
-                        return Err(format!("Invalid array index: {}", child_key));
-                    }
-                }
-                _ => return Err("Parent is not an Object or Array".to_string()),
-            }
-        } else {
-            return Err("Parent node not found".to_string());
+        let parent_idx = match find_node_by_path(&self.nodes, parent_path) {
+            Some(i) => i,
+            None => return Err("Parent node not found".to_string()),
+        };
+        let child_idx = match self.nodes[parent_idx].children.iter().position(|&ci| {
+            self.nodes
+                .get(ci)
+                .map(|c| c.path.last().map(|s| s == child_key).unwrap_or(false))
+                .unwrap_or(false)
+        }) {
+            Some(p) => self.nodes[parent_idx].children[p],
+            None => return Err("Child not found".to_string()),
+        };
+        // Tombstone: remove from parent's children, set is_active=false, clear value
+        let pos_in_children = self.nodes[parent_idx]
+            .children
+            .iter()
+            .position(|&c| c == child_idx)
+            .unwrap();
+        self.nodes[parent_idx].children.remove(pos_in_children);
+        if let Some(child) = self.nodes.get_mut(child_idx) {
+            child.is_active = false;
+            child.value = Value::Null;
+            child.children.clear();
         }
-
+        // Renumber remaining children paths for array parents (active + disabled)
+        crate::format::renumber_array_children(&mut self.nodes, parent_idx);
+        self.sync_value_from_active_children(parent_idx);
+        let mut cur = parent_idx;
+        while !self.nodes[cur].path.is_empty() {
+            let ancestor_path = self.nodes[cur].path[..self.nodes[cur].path.len() - 1].to_vec();
+            match find_node_by_path(&self.nodes, &ancestor_path) {
+                Some(ai) => {
+                    self.sync_value_from_active_children(ai);
+                    cur = ai;
+                }
+                None => break,
+            }
+        }
         self.all_nodes_cache.retain(|n| !n.path.starts_with(path));
+        // Track deleted node's position in flattened list before rebuild
+        let deleted_flat_pos = self.flattened_nodes.iter().position(|n| n.path == path);
         self.rebuild_flattened();
-
-        // Adjust selected if it's now out of bounds
+        // Adjust selected: if deleted node was before cursor, shift cursor back
+        if let Some(del_pos) = deleted_flat_pos {
+            if del_pos < self.selected {
+                self.selected = self.selected.saturating_sub(1);
+            }
+        }
         if self.selected >= self.flattened_nodes.len() {
             self.selected = self.flattened_nodes.len().saturating_sub(1);
         }
-
         Ok(())
     }
 
@@ -787,63 +888,109 @@ impl EditorState {
         value: Value,
     ) -> Result<(), String> {
         self.save_to_undo();
-        let parent_pointer = to_json_pointer(parent_path);
-        let mut child_path = parent_path.to_vec();
-
-        if let Some(parent) = self.data.pointer_mut(&parent_pointer) {
-            if parent.is_null() {
-                let mut initialized = false;
-                if let Some(schema) = &self.schema {
-                    if let Some(t) = crate::edit::find_sub_schema(schema, parent_path)
-                        .and_then(|sub| sub.get("type"))
-                        .and_then(|v| v.as_str())
-                    {
-                        if t == "array" {
-                            *parent = Value::Array(Vec::new());
-                            initialized = true;
-                        } else if t == "object" {
-                            *parent = Value::Object(serde_json::Map::new());
-                            initialized = true;
-                        }
-                    }
-                }
-                if !initialized {
-                    if key.is_some() {
-                        *parent = Value::Object(serde_json::Map::new());
-                    } else {
-                        *parent = Value::Array(Vec::new());
-                    }
-                }
-            }
-
-            match parent {
+        let parent_idx = match find_node_by_path(&self.nodes, parent_path) {
+            Some(i) => i,
+            None => return Err("Parent node not found".to_string()),
+        };
+        let (segment, new_value_for_parent): (String, Value) = {
+            let parent = &self.nodes[parent_idx];
+            match &parent.value {
                 Value::Object(map) => {
-                    let k = key.ok_or_else(|| "Key required for Object".to_string())?;
-                    child_path.push(k.clone());
-                    map.insert(k, value);
+                    let k = key
+                        .as_ref()
+                        .ok_or_else(|| "Key required for Object".to_string())?
+                        .clone();
+                    if map.contains_key(&k) {
+                        return Err(format!("Key already exists: {}", k));
+                    }
+                    let mut m = map.clone();
+                    m.insert(k.clone(), value.clone());
+                    (k, Value::Object(m))
                 }
                 Value::Array(arr) => {
-                    child_path.push(arr.len().to_string());
-                    arr.push(value);
+                    // Path segment must be unique across ALL children, including
+                    // inactive (commented) ones that retain their original index.
+                    // Using arr.len() (active count) can collide with an existing
+                    // index when earlier items are commented out.
+                    let next_idx = parent
+                        .children
+                        .iter()
+                        .filter_map(|&ci| self.nodes.get(ci))
+                        .filter_map(|c| c.path.last())
+                        .filter_map(|s| s.parse::<usize>().ok())
+                        .max()
+                        .map(|m| m + 1)
+                        .unwrap_or(0)
+                        .max(arr.len());
+                    (next_idx.to_string(), {
+                        let mut a = arr.clone();
+                        a.push(value.clone());
+                        Value::Array(a)
+                    })
                 }
-                _ => return Err("Parent is not an Object or Array".to_string()),
+                Value::Null => {
+                    // initialize
+                    if let Some(k) = key.as_ref() {
+                        let mut m = serde_json::Map::new();
+                        m.insert(k.clone(), value.clone());
+                        (k.clone(), Value::Object(m))
+                    } else {
+                        let a = vec![value.clone()];
+                        ("0".to_string(), Value::Array(a))
+                    }
+                }
+                _ => return Err("Parent is not Object/Array/Null".to_string()),
+            }
+        };
+        // schema-driven init for null parent
+        let final_parent_value = if self.nodes[parent_idx].value.is_null() {
+            if let Some(schema) = &self.schema {
+                if let Some(t) = crate::schema_util::find_sub_schema(schema, parent_path)
+                    .and_then(|s| s.get("type"))
+                    .and_then(|v| v.as_str())
+                {
+                    if t == "array" && key.is_none() {
+                        let a = vec![value.clone()];
+                        Value::Array(a)
+                    } else if t == "object" && key.is_some() {
+                        let mut m = serde_json::Map::new();
+                        m.insert(key.unwrap(), value.clone());
+                        Value::Object(m)
+                    } else {
+                        new_value_for_parent
+                    }
+                } else {
+                    new_value_for_parent
+                }
+            } else {
+                new_value_for_parent
             }
         } else {
-            return Err("Parent node not found".to_string());
-        }
+            new_value_for_parent
+        };
 
-        // Set the parent node's expanded state to true
-        if let Some(parent_node) = self
+        self.nodes[parent_idx].value = final_parent_value.clone();
+        let mut child_path = parent_path.to_vec();
+        child_path.push(segment.clone());
+        let new_idx = self.nodes.len();
+        self.nodes.push(AnnotatedNode {
+            value: value.clone(),
+            is_active: true,
+            comments: Vec::new(),
+            children: Vec::new(),
+            path: child_path.clone(),
+        });
+        self.nodes[parent_idx].children.push(new_idx);
+
+        // Expand parent in cache
+        if let Some(pn) = self
             .flattened_nodes
             .iter_mut()
             .find(|n| n.path == parent_path)
         {
-            parent_node.expanded = true;
+            pn.expanded = true;
         }
-
         self.rebuild_flattened();
-
-        // Move the cursor to the newly added child node
         if let Some(pos) = self
             .flattened_nodes
             .iter()
@@ -851,7 +998,6 @@ impl EditorState {
         {
             self.selected = pos;
         }
-
         Ok(())
     }
 
@@ -860,65 +1006,47 @@ impl EditorState {
             Some(n) => n.clone(),
             None => return,
         };
-
         if node.path.is_empty() {
             return;
         }
-
         let parent_path = &node.path[..node.path.len() - 1];
         let child_key = &node.path[node.path.len() - 1];
-        let parent_pointer = to_json_pointer(parent_path);
-
-        let mut can_move = false;
-        if let Some(parent) = self.data.pointer(&parent_pointer) {
-            match parent {
-                Value::Array(_) => {
-                    if child_key.parse::<usize>().is_ok_and(|idx| idx > 0) {
-                        can_move = true;
-                    }
-                }
-                Value::Object(map) => {
-                    if map
-                        .keys()
-                        .position(|k| k == child_key)
-                        .is_some_and(|idx| idx > 0)
-                    {
-                        can_move = true;
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        if !can_move {
+        let parent_idx = match find_node_by_path(&self.nodes, parent_path) {
+            Some(i) => i,
+            None => return,
+        };
+        let children = &self.nodes[parent_idx].children;
+        let cur_pos = children.iter().position(|&ci| {
+            self.nodes
+                .get(ci)
+                .map(|c| c.path.last() == Some(child_key))
+                .unwrap_or(false)
+        });
+        let Some(pos) = cur_pos else { return };
+        if pos == 0 {
             return;
         }
-
         self.save_to_undo();
+        self.nodes[parent_idx].children.swap(pos, pos - 1);
+        // Rebuild parent value from children order, compute new_path
         let mut new_path = node.path.clone();
-
-        if let Some(parent) = self.data.pointer_mut(&parent_pointer) {
-            match parent {
-                Value::Array(arr) => {
-                    let idx = child_key.parse::<usize>().unwrap();
-                    arr.swap(idx, idx - 1);
-                    new_path[node.path.len() - 1] = (idx - 1).to_string();
-                }
-                Value::Object(map) => {
-                    let mut items: Vec<(String, serde_json::Value)> =
-                        std::mem::take(map).into_iter().collect();
-                    let idx = items.iter().position(|(k, _)| k == child_key).unwrap();
-                    items.swap(idx, idx - 1);
-                    *map = items.into_iter().collect();
-                }
-                _ => {}
+        match &self.nodes[parent_idx].value {
+            Value::Array(_) => {
+                let i = child_key.parse::<usize>().unwrap_or(0);
+                new_path[node.path.len() - 1] = (i.saturating_sub(1)).to_string();
             }
+            Value::Object(_) => {
+                new_path = node.path.clone();
+            }
+            _ => {}
         }
-
+        self.sync_value_from_active_children(parent_idx);
+        // Renumber children paths for array parents (active + disabled)
+        crate::format::renumber_array_children(&mut self.nodes, parent_idx);
         self.key_order_changed = true;
         self.rebuild_flattened();
-        if let Some(pos) = self.flattened_nodes.iter().position(|n| n.path == new_path) {
-            self.selected = pos;
+        if let Some(p) = self.flattened_nodes.iter().position(|n| n.path == new_path) {
+            self.selected = p;
         }
     }
 
@@ -927,68 +1055,114 @@ impl EditorState {
             Some(n) => n.clone(),
             None => return,
         };
-
         if node.path.is_empty() {
             return;
         }
-
         let parent_path = &node.path[..node.path.len() - 1];
         let child_key = &node.path[node.path.len() - 1];
-        let parent_pointer = to_json_pointer(parent_path);
-
-        let mut can_move = false;
-        if let Some(parent) = self.data.pointer(&parent_pointer) {
-            match parent {
-                Value::Array(arr) => {
-                    if child_key
-                        .parse::<usize>()
-                        .is_ok_and(|idx| idx + 1 < arr.len())
-                    {
-                        can_move = true;
-                    }
-                }
-                Value::Object(map) => {
-                    if map
-                        .keys()
-                        .position(|k| k == child_key)
-                        .is_some_and(|idx| idx + 1 < map.len())
-                    {
-                        can_move = true;
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        if !can_move {
+        let parent_idx = match find_node_by_path(&self.nodes, parent_path) {
+            Some(i) => i,
+            None => return,
+        };
+        let children = &self.nodes[parent_idx].children;
+        let cur_pos = children.iter().position(|&ci| {
+            self.nodes
+                .get(ci)
+                .map(|c| c.path.last() == Some(child_key))
+                .unwrap_or(false)
+        });
+        let Some(pos) = cur_pos else { return };
+        if pos + 1 >= children.len() {
             return;
         }
-
         self.save_to_undo();
+        self.nodes[parent_idx].children.swap(pos, pos + 1);
+        // Rebuild parent value from children order, compute new_path
         let mut new_path = node.path.clone();
+        match &self.nodes[parent_idx].value {
+            Value::Array(_) => {
+                let i = child_key.parse::<usize>().unwrap_or(0);
+                new_path[node.path.len() - 1] = (i + 1).to_string();
+            }
+            Value::Object(_) => {
+                new_path = node.path.clone();
+            }
+            _ => {}
+        }
+        self.sync_value_from_active_children(parent_idx);
+        // Renumber children paths for array parents (active + disabled)
+        crate::format::renumber_array_children(&mut self.nodes, parent_idx);
+        self.key_order_changed = true;
+        self.rebuild_flattened();
+        if let Some(p) = self.flattened_nodes.iter().position(|n| n.path == new_path) {
+            self.selected = p;
+        }
+    }
 
-        if let Some(parent) = self.data.pointer_mut(&parent_pointer) {
-            match parent {
-                Value::Array(arr) => {
-                    let idx = child_key.parse::<usize>().unwrap();
-                    arr.swap(idx, idx + 1);
-                    new_path[node.path.len() - 1] = (idx + 1).to_string();
-                }
-                Value::Object(map) => {
-                    let mut items: Vec<(String, serde_json::Value)> =
-                        std::mem::take(map).into_iter().collect();
-                    let idx = items.iter().position(|(k, _)| k == child_key).unwrap();
-                    items.swap(idx, idx + 1);
-                    *map = items.into_iter().collect();
-                }
-                _ => {}
+    pub fn toggle_comment(&mut self) -> Result<(), String> {
+        let node = match self.selected_node() {
+            Some(n) => n.clone(),
+            None => return Err("No node selected".to_string()),
+        };
+        if node.path.is_empty() {
+            return Err("Cannot toggle root node".to_string());
+        }
+        self.save_to_undo();
+        if let Some(idx) = find_node_by_path(&self.nodes, &node.path) {
+            let n = &mut self.nodes[idx];
+            n.is_active = !n.is_active;
+        } else {
+            return Err("Node not found in nodes vec".to_string());
+        }
+        self.rebuild_flattened();
+        if let Some(pos) = self
+            .flattened_nodes
+            .iter()
+            .position(|n| n.path == node.path)
+        {
+            self.selected = pos;
+        }
+        Ok(())
+    }
+
+    fn expand_ancestors_and_navigate(&mut self, target_path: &[String]) {
+        let mut ancestors = Vec::new();
+        for i in 1..target_path.len() {
+            ancestors.push(target_path[..i].to_vec());
+        }
+
+        for p in ancestors {
+            if let Some(node) = self.flattened_nodes.iter_mut().find(|n| n.path == p) {
+                node.expanded = true;
+            } else {
+                self.flattened_nodes.push(UiNode {
+                    path: p,
+                    depth: 0,
+                    key: String::new(),
+                    value_display: String::new(),
+                    value_type: ValueType::Null,
+                    node_type: NodeType::Leaf,
+                    expanded: true,
+                    is_disabled_comment: false,
+                    has_comment: false,
+                    comment_preview: None,
+                });
             }
         }
 
-        self.key_order_changed = true;
         self.rebuild_flattened();
-        if let Some(pos) = self.flattened_nodes.iter().position(|n| n.path == new_path) {
+
+        if let Some(pos) = self
+            .flattened_nodes
+            .iter()
+            .position(|n| n.path == target_path)
+        {
             self.selected = pos;
+            if self.selected < self.scroll_offset
+                || self.selected >= self.scroll_offset + self.viewport_height
+            {
+                self.scroll_offset = self.selected.saturating_sub(self.viewport_height / 2);
+            }
         }
     }
 
@@ -1001,12 +1175,7 @@ impl EditorState {
 
         let query_lower = query.to_lowercase();
         let mut all_nodes = Vec::new();
-        self.collect_search_nodes(
-            &self.data.clone(),
-            Vec::new(),
-            "root".to_string(),
-            &mut all_nodes,
-        );
+        self.collect_search_nodes(self.root, &mut all_nodes);
 
         // Find matches
         let matches: Vec<_> = all_nodes
@@ -1042,45 +1211,7 @@ impl EditorState {
             .map(|(_, node)| node);
 
         if let Some(target) = target_match {
-            // Expand all ancestors
-            let mut ancestors = Vec::new();
-            for i in 1..target.path.len() {
-                ancestors.push(target.path[..i].to_vec());
-            }
-
-            for p in ancestors {
-                if let Some(node) = self.flattened_nodes.iter_mut().find(|n| n.path == p) {
-                    node.expanded = true;
-                } else {
-                    // Force expansion of previously unflattened node
-                    self.flattened_nodes.push(UiNode {
-                        path: p,
-                        depth: 0,
-                        key: String::new(),
-                        value_display: String::new(),
-                        value_type: ValueType::Null,
-                        node_type: NodeType::Leaf, // NodeType doesn't matter for expansion check in rebuild_flattened
-                        expanded: true,
-                    });
-                }
-            }
-
-            self.rebuild_flattened();
-
-            // Find new index
-            if let Some(pos) = self
-                .flattened_nodes
-                .iter()
-                .position(|n| n.path == target.path)
-            {
-                self.selected = pos;
-                // Center viewport if needed
-                if self.selected < self.scroll_offset
-                    || self.selected >= self.scroll_offset + self.viewport_height
-                {
-                    self.scroll_offset = self.selected.saturating_sub(self.viewport_height / 2);
-                }
-            }
+            self.expand_ancestors_and_navigate(&target.path);
             self.set_status(format!("Found: {}", query));
         }
 
@@ -1096,12 +1227,7 @@ impl EditorState {
 
         let query_lower = query.to_lowercase();
         let mut all_nodes = Vec::new();
-        self.collect_search_nodes(
-            &self.data.clone(),
-            Vec::new(),
-            "root".to_string(),
-            &mut all_nodes,
-        );
+        self.collect_search_nodes(self.root, &mut all_nodes);
 
         let matches: Vec<_> = all_nodes
             .iter()
@@ -1155,12 +1281,7 @@ impl EditorState {
         }
 
         let mut all_nodes = Vec::new();
-        self.collect_search_nodes(
-            &self.data.clone(),
-            Vec::new(),
-            "root".to_string(),
-            &mut all_nodes,
-        );
+        self.collect_search_nodes(self.root, &mut all_nodes);
 
         // Find matches
         let matches: Vec<_> = all_nodes
@@ -1178,159 +1299,63 @@ impl EditorState {
         }
 
         // In real-time mode, we jump to the first match
-        let target = matches.first().map(|(_, node)| node).unwrap();
+        let Some(target) = matches.first().map(|(_, node)| node) else {
+            return;
+        };
 
-        // Expand all ancestors
-        let mut ancestors = Vec::new();
-        for i in 1..target.path.len() {
-            ancestors.push(target.path[..i].to_vec());
-        }
-
-        for p in ancestors {
-            if let Some(node) = self.flattened_nodes.iter_mut().find(|n| n.path == p) {
-                node.expanded = true;
-            } else {
-                // Force expansion of previously unflattened node
-                self.flattened_nodes.push(UiNode {
-                    path: p,
-                    depth: 0,
-                    key: String::new(),
-                    value_display: String::new(),
-                    value_type: ValueType::Null,
-                    node_type: NodeType::Leaf,
-                    expanded: true,
-                });
-            }
-        }
-
-        self.rebuild_flattened();
-
-        // Find new index
-        if let Some(pos) = self
-            .flattened_nodes
-            .iter()
-            .position(|n| n.path == target.path)
-        {
-            self.selected = pos;
-            // Center viewport if needed
-            if self.selected < self.scroll_offset
-                || self.selected >= self.scroll_offset + self.viewport_height
-            {
-                self.scroll_offset = self.selected.saturating_sub(self.viewport_height / 2);
-            }
-        }
+        self.expand_ancestors_and_navigate(&target.path);
 
         self.update_search_match_stats(query);
     }
 
-    fn collect_search_nodes(
-        &self,
-        value: &Value,
-        path: Vec<String>,
-        key: String,
-        nodes: &mut Vec<SearchNode>,
-    ) {
-        let value_display = match value {
-            Value::Null => "null".to_string(),
-            Value::Bool(b) => b.to_string(),
-            Value::Number(n) => n.to_string(),
-            Value::String(s) => format!("\"{}\"", s),
-            Value::Array(_) | Value::Object(_) => String::new(),
+    fn collect_search_nodes(&self, idx: usize, all_nodes: &mut Vec<SearchNode>) {
+        let Some(node) = self.nodes.get(idx) else {
+            return;
         };
-
-        nodes.push(SearchNode {
-            path: path.clone(),
+        let key = node
+            .path
+            .last()
+            .cloned()
+            .unwrap_or_else(|| "root".to_string());
+        let value_str = match &node.value {
+            Value::String(s) => s.clone(),
+            Value::Object(_) | Value::Array(_) => String::new(),
+            v => v.to_string(),
+        };
+        all_nodes.push(SearchNode {
+            path: node.path.clone(),
             key,
-            value: value_display,
+            value: value_str,
         });
-
-        match value {
-            Value::Object(map) => {
-                for (k, v) in map {
-                    let mut child_path = path.clone();
-                    child_path.push(k.clone());
-                    self.collect_search_nodes(v, child_path, k.clone(), nodes);
-                }
-            }
-            Value::Array(arr) => {
-                for (i, v) in arr.iter().enumerate() {
-                    let mut child_path = path.clone();
-                    child_path.push(i.to_string());
-                    self.collect_search_nodes(v, child_path, i.to_string(), nodes);
-                }
-            }
-            _ => {}
+        for &child_idx in &node.children {
+            self.collect_search_nodes(child_idx, all_nodes);
         }
-    }
-
-    pub fn data(&self) -> &Value {
-        &self.data
     }
 
     pub fn selected_node(&self) -> Option<&UiNode> {
         self.flattened_nodes.get(self.selected)
     }
 
-    pub fn is_tooltip_active(&self) -> bool {
-        match &self.edit_mode {
-            EditMode::Normal => {
-                if let Some(node) = self.selected_node() {
-                    if let Some(schema) = &self.schema {
-                        if let Some(sub) = crate::edit::find_sub_schema(schema, &node.path) {
-                            if let Some(desc) = crate::render::extract_description(sub) {
-                                return !desc.is_empty();
-                            }
-                        }
-                    }
-                }
-                false
-            }
-            EditMode::Dropdown {
-                descriptions,
-                selected,
-                ..
-            }
-            | EditMode::NewKeyDropdown {
-                descriptions,
-                selected,
-                ..
-            }
-            | EditMode::OneOfVariantDropdown {
-                descriptions,
-                selected,
-                ..
-            } => {
-                if let Some(Some(desc)) = descriptions.get(*selected) {
-                    !desc.is_empty()
-                } else {
-                    false
-                }
-            }
-            _ => false,
-        }
-    }
-
+    /// Scroll the tooltip by delta, clamping to the scroll limit.
     pub fn scroll_tooltip(&mut self, delta: isize) {
-        if delta < 0 {
-            self.tooltip_scroll_offset = self
-                .tooltip_scroll_offset
-                .saturating_sub(delta.unsigned_abs());
-        } else {
-            self.tooltip_scroll_offset = self.tooltip_scroll_offset.saturating_add(delta as usize);
+        let limit = self.tooltip.scroll_limit(self);
+        self.tooltip.scroll(delta);
+        if let Some(limit) = limit {
+            self.tooltip.clamp_scroll(limit);
         }
     }
 
     /// Get completion suggestions based on the current cursor node.
-    pub fn get_completions_at_cursor(&self) -> Vec<CompletionItem> {
+    pub fn completions_at_cursor(&self) -> Vec<CompletionItem> {
         if let Some(node) = self.selected_node() {
-            self.get_completions_for_path(&node.path)
+            self.completions_for_path(&node.path)
         } else {
             Vec::new()
         }
     }
 
     /// Get completion suggestions at a specific path.
-    pub fn get_completions_for_path(&self, path: &[String]) -> Vec<CompletionItem> {
+    pub fn completions_for_path(&self, path: &[String]) -> Vec<CompletionItem> {
         crate::edit::get_completions_for_path(self, path)
     }
 
@@ -1348,29 +1373,27 @@ impl EditorState {
 
         // 1. Calculate the number of nodes per level
         let mut counts = Vec::new();
-        crate::flatten::count_nodes_per_level(&self.data, 0, &mut counts);
+        crate::flatten::count_nodes_per_level(&self.nodes, self.root, 0, &mut counts);
 
         // 2. Calculate the maximum depth that can be expanded within the limit
         let mut max_expand_depth = 0;
         let mut current_total = counts[0];
 
         for d in 0..counts.len() {
-            if d + 1 < counts.len() {
-                if current_total + counts[d + 1] <= limit {
-                    current_total += counts[d + 1];
-                    max_expand_depth = d;
-                } else {
-                    break;
-                }
-            } else {
+            if d + 1 >= counts.len() {
                 max_expand_depth = d;
                 break;
             }
+            if current_total + counts[d + 1] > limit {
+                break;
+            }
+            current_total += counts[d + 1];
+            max_expand_depth = d;
         }
 
         let mut dummy_prev_nodes = Vec::new();
-        self.collect_expansion_paths(
-            &self.data,
+        self.collect_expansion_paths_nodes(
+            self.root,
             Vec::new(),
             0,
             max_expand_depth,
@@ -1379,16 +1402,18 @@ impl EditorState {
 
         // 4. Rebuild the flattened view based on the dummy node list
         self.flattened_nodes = crate::flatten::rebuild_flattened(
-            &self.data,
+            &self.nodes,
+            self.root,
             &dummy_prev_nodes,
             self.show_child_counts,
             self.schema.as_ref(),
+            self.format,
         );
     }
 
-    fn collect_expansion_paths(
+    fn collect_expansion_paths_nodes(
         &self,
-        value: &serde_json::Value,
+        idx: usize,
         path: Vec<String>,
         depth: usize,
         max_depth: usize,
@@ -1398,10 +1423,10 @@ impl EditorState {
             return;
         }
 
-        let is_container = matches!(
-            value,
-            serde_json::Value::Object(_) | serde_json::Value::Array(_)
-        );
+        let Some(node) = self.nodes.get(idx) else {
+            return;
+        };
+        let is_container = !node.children.is_empty();
         if !is_container {
             return;
         }
@@ -1411,36 +1436,27 @@ impl EditorState {
             depth,
             key: String::new(),
             value_display: String::new(),
-            value_type: ValueType::Null, // Dummy
-            node_type: NodeType::Leaf,   // Dummy
+            value_type: ValueType::Null,
+            node_type: NodeType::Leaf,
             expanded: true,
+            is_disabled_comment: false,
+            has_comment: false,
+            comment_preview: None,
         });
 
-        match value {
-            serde_json::Value::Object(map) => {
-                let keys: Vec<_> = map.keys().collect();
-                for k in keys {
-                    let mut child_path = path.clone();
-                    child_path.push(k.clone());
-                    self.collect_expansion_paths(&map[k], child_path, depth + 1, max_depth, nodes);
-                }
+        for &child_idx in &node.children {
+            if let Some(child) = self.nodes.get(child_idx) {
+                let mut child_path = path.clone();
+                child_path.push(child.path.last().cloned().unwrap_or_default());
+                self.collect_expansion_paths_nodes(
+                    child_idx,
+                    child_path,
+                    depth + 1,
+                    max_depth,
+                    nodes,
+                );
             }
-            serde_json::Value::Array(arr) => {
-                for (i, v) in arr.iter().enumerate() {
-                    let mut child_path = path.clone();
-                    child_path.push(i.to_string());
-                    self.collect_expansion_paths(v, child_path, depth + 1, max_depth, nodes);
-                }
-            }
-            _ => {}
         }
-    }
-
-    pub(crate) fn char_to_byte_index(s: &str, char_idx: usize) -> usize {
-        s.char_indices()
-            .nth(char_idx)
-            .map(|(i, _)| i)
-            .unwrap_or_else(|| s.len())
     }
 
     pub fn handle_key_event(&mut self, event: crossterm::event::KeyEvent) -> crate::action::Action {
@@ -1499,65 +1515,52 @@ impl EditorState {
 
         match &mut self.edit_mode {
             EditMode::Normal => {
-                // Handle 's' for saving
-                if event.code == KeyCode::Char('s')
-                    && !event.modifiers.contains(KeyModifiers::CONTROL)
-                    && !event.modifiers.contains(KeyModifiers::ALT)
+                // Single-key shortcuts (no modifiers)
+                if !event
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
                 {
-                    return Action::Save {
-                        data: self.data.clone(),
-                        format: self.format,
-                    };
-                }
-
-                // Handle 'u' for Undo
-                if event.code == KeyCode::Char('u')
-                    && !event.modifiers.contains(KeyModifiers::CONTROL)
-                    && !event.modifiers.contains(KeyModifiers::ALT)
-                {
-                    self.undo();
-                    return Action::Noop;
-                }
-
-                // Handle 'r' for Redo
-                if event.code == KeyCode::Char('r')
-                    && !event.modifiers.contains(KeyModifiers::CONTROL)
-                    && !event.modifiers.contains(KeyModifiers::ALT)
-                {
-                    self.redo();
-                    return Action::Noop;
-                }
-
-                // Handle T for toggling type hints
-                if event.code == KeyCode::Char('t')
-                    && !event.modifiers.contains(KeyModifiers::CONTROL)
-                    && !event.modifiers.contains(KeyModifiers::ALT)
-                {
-                    self.show_type_hints = !self.show_type_hints;
-                    return Action::Noop;
-                }
-
-                // Handle K for toggling child counts
-                if event.code == KeyCode::Char('k')
-                    && !event.modifiers.contains(KeyModifiers::CONTROL)
-                    && !event.modifiers.contains(KeyModifiers::ALT)
-                {
-                    self.show_child_counts = !self.show_child_counts;
-                    self.rebuild_flattened();
-                    return Action::Noop;
-                }
-
-                // Handle '/' for search
-                if event.code == KeyCode::Char('/')
-                    && !event.modifiers.contains(KeyModifiers::CONTROL)
-                    && !event.modifiers.contains(KeyModifiers::ALT)
-                {
-                    self.edit_mode = EditMode::SearchPrompt {
-                        buffer: String::new(),
-                        cursor_pos: 0,
-                    };
-                    self.search_query = Some(String::new());
-                    return Action::Noop;
+                    if let KeyCode::Char(c) = event.code {
+                        match c.to_ascii_lowercase() {
+                            's' => {
+                                return Action::Save {
+                                    format: self.format,
+                                };
+                            }
+                            'u' => {
+                                self.undo();
+                                return Action::Noop;
+                            }
+                            'r' => {
+                                self.redo();
+                                return Action::Noop;
+                            }
+                            't' => {
+                                self.show_type_hints = !self.show_type_hints;
+                                return Action::Noop;
+                            }
+                            'k' => {
+                                self.show_child_counts = !self.show_child_counts;
+                                self.rebuild_flattened();
+                                return Action::Noop;
+                            }
+                            'f' => {
+                                self.edit_mode = EditMode::SearchPrompt {
+                                    buffer: String::new(),
+                                    cursor_pos: 0,
+                                };
+                                self.search_query = Some(String::new());
+                                return Action::Noop;
+                            }
+                            '/' => {
+                                if let Err(e) = self.toggle_comment() {
+                                    self.set_status(e);
+                                }
+                                return Action::Noop;
+                            }
+                            _ => {}
+                        }
+                    }
                 }
 
                 if event.modifiers.contains(KeyModifiers::CONTROL) {
@@ -1580,15 +1583,15 @@ impl EditorState {
                         return Action::Noop;
                     }
                     KeyCode::Up => {
-                        self.tooltip_scroll_offset = 0;
+                        self.tooltip.reset_scroll();
                         crate::navigate::move_up(self)
                     }
                     KeyCode::Down => {
-                        self.tooltip_scroll_offset = 0;
+                        self.tooltip.reset_scroll();
                         crate::navigate::move_down(self)
                     }
                     KeyCode::PageUp => {
-                        if self.is_tooltip_active() {
+                        if self.tooltip.is_active(self) {
                             self.scroll_tooltip(-1);
                             return Action::Noop;
                         } else {
@@ -1596,7 +1599,7 @@ impl EditorState {
                         }
                     }
                     KeyCode::PageDown => {
-                        if self.is_tooltip_active() {
+                        if self.tooltip.is_active(self) {
                             self.scroll_tooltip(1);
                             return Action::Noop;
                         } else {
@@ -1604,15 +1607,15 @@ impl EditorState {
                         }
                     }
                     KeyCode::Left => {
-                        self.tooltip_scroll_offset = 0;
+                        self.tooltip.reset_scroll();
                         crate::navigate::collapse_current(self)
                     }
                     KeyCode::Right => {
-                        self.tooltip_scroll_offset = 0;
+                        self.tooltip.reset_scroll();
                         crate::navigate::expand_or_move_to_last_child(self)
                     }
                     KeyCode::Char(' ') => {
-                        self.tooltip_scroll_offset = 0;
+                        self.tooltip.reset_scroll();
                         crate::navigate::toggle_expand(self)
                     }
                     KeyCode::Enter => {
@@ -1632,7 +1635,7 @@ impl EditorState {
                     KeyCode::Backspace => {
                         crate::edit::start_edit_cleared(self);
                     }
-                    KeyCode::Esc | KeyCode::Char('q')
+                    KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('Q')
                         if event.code == KeyCode::Esc
                             || (!event.modifiers.contains(KeyModifiers::CONTROL)
                                 && !event.modifiers.contains(KeyModifiers::ALT)) =>
@@ -1644,7 +1647,7 @@ impl EditorState {
                             return Action::Noop;
                         }
                         let is_actually_dirty = self.is_dirty
-                            && (self.data != self.original_data || self.key_order_changed);
+                            && (self.nodes != self.original_nodes || self.key_order_changed);
                         if is_actually_dirty {
                             self.edit_mode = EditMode::SavePrompt { selected: 0 };
                             return Action::Noop;
@@ -1687,7 +1690,7 @@ impl EditorState {
                         return Action::Noop;
                     }
                     KeyCode::Char(c) => {
-                        let byte_idx = Self::char_to_byte_index(buffer, *cursor_pos);
+                        let byte_idx = char_to_byte_index(buffer, *cursor_pos);
                         buffer.insert(byte_idx, c);
                         *cursor_pos += 1;
                         self.search_query = Some(buffer.clone());
@@ -1696,7 +1699,7 @@ impl EditorState {
                     KeyCode::Backspace => {
                         if *cursor_pos > 0 {
                             *cursor_pos -= 1;
-                            let byte_idx = Self::char_to_byte_index(buffer, *cursor_pos);
+                            let byte_idx = char_to_byte_index(buffer, *cursor_pos);
                             buffer.remove(byte_idx);
                         }
                         self.search_query = Some(buffer.clone());
@@ -1735,14 +1738,12 @@ impl EditorState {
                         return Action::Quit;
                     } else {
                         return Action::SaveAndQuit {
-                            data: self.data.clone(),
                             format: self.format,
                         };
                     }
                 }
                 KeyCode::Char('y') | KeyCode::Char('Y') => {
                     return Action::SaveAndQuit {
-                        data: self.data.clone(),
                         format: self.format,
                     };
                 }
@@ -1766,14 +1767,14 @@ impl EditorState {
                     KeyCode::Enter => crate::edit::apply_edit(self),
                     KeyCode::Esc => crate::edit::cancel_edit(self),
                     KeyCode::Char(c) => {
-                        let byte_idx = Self::char_to_byte_index(buffer, *cursor_pos);
+                        let byte_idx = char_to_byte_index(buffer, *cursor_pos);
                         buffer.insert(byte_idx, c);
                         *cursor_pos += 1;
                     }
                     KeyCode::Backspace => {
                         if *cursor_pos > 0 {
                             *cursor_pos -= 1;
-                            let byte_idx = Self::char_to_byte_index(buffer, *cursor_pos);
+                            let byte_idx = char_to_byte_index(buffer, *cursor_pos);
                             buffer.remove(byte_idx);
                         } else if matches!(self.edit_mode, EditMode::TextPrompt { .. }) {
                             if is_backspace_repeat {
@@ -1784,22 +1785,22 @@ impl EditorState {
                                 self.selected_node().cloned().filter(|n| !n.path.is_empty())
                             {
                                 let mut parent_path = node.path.clone();
-                                let original_key = parent_path.pop().unwrap();
+                                let Some(original_key) = parent_path.pop() else {
+                                    return Action::Noop;
+                                };
 
                                 // Check if parent is an object
                                 let is_parent_object = if parent_path.is_empty() {
-                                    self.data.is_object()
+                                    self.nodes[self.root].value.is_object()
                                 } else {
-                                    self.data
-                                        .pointer(&crate::state::to_json_pointer(&parent_path))
+                                    self.node_at_path_as_value(&parent_path)
                                         .map(|v| v.is_object())
                                         .unwrap_or(false)
                                 };
 
                                 if is_parent_object {
                                     let current_value = self
-                                        .data
-                                        .pointer(&crate::state::to_json_pointer(&node.path))
+                                        .node_at_path_as_value(&node.path)
                                         .cloned()
                                         .unwrap_or(serde_json::Value::Null);
 
@@ -1892,14 +1893,14 @@ impl EditorState {
                 }
                 KeyCode::Esc => crate::edit::cancel_edit(self),
                 KeyCode::Up if *selected > 0 => {
-                    self.tooltip_scroll_offset = 0;
+                    self.tooltip.reset_scroll();
                     *selected -= 1;
                     if *selected < *scroll_offset {
                         *scroll_offset = *selected;
                     }
                 }
                 KeyCode::Down if *selected + 1 < filtered_indices.len() => {
-                    self.tooltip_scroll_offset = 0;
+                    self.tooltip.reset_scroll();
                     *selected += 1;
                     let visible = self.dropdown_visible_items;
                     if visible > 0 && *selected >= *scroll_offset + visible {
@@ -1907,12 +1908,12 @@ impl EditorState {
                     }
                 }
                 KeyCode::PageUp => {
-                    if self.is_tooltip_active() {
+                    if self.tooltip.is_active(self) {
                         self.scroll_tooltip(-1);
                     }
                 }
                 KeyCode::PageDown => {
-                    if self.is_tooltip_active() {
+                    if self.tooltip.is_active(self) {
                         self.scroll_tooltip(1);
                     }
                 }
@@ -1968,14 +1969,14 @@ impl EditorState {
                 }
                 KeyCode::Esc => crate::edit::cancel_edit(self),
                 KeyCode::Up if *selected > 0 => {
-                    self.tooltip_scroll_offset = 0;
+                    self.tooltip.reset_scroll();
                     *selected -= 1;
                     if *selected < *scroll_offset {
                         *scroll_offset = *selected;
                     }
                 }
                 KeyCode::Down if *selected + 1 < filtered_indices.len() => {
-                    self.tooltip_scroll_offset = 0;
+                    self.tooltip.reset_scroll();
                     *selected += 1;
                     let visible = self.dropdown_visible_items;
                     if visible > 0 && *selected >= *scroll_offset + visible {
@@ -1983,17 +1984,17 @@ impl EditorState {
                     }
                 }
                 KeyCode::PageUp => {
-                    if self.is_tooltip_active() {
+                    if self.tooltip.is_active(self) {
                         self.scroll_tooltip(-1);
                     }
                 }
                 KeyCode::PageDown => {
-                    if self.is_tooltip_active() {
+                    if self.tooltip.is_active(self) {
                         self.scroll_tooltip(1);
                     }
                 }
                 KeyCode::Char(c) => {
-                    let byte_idx = Self::char_to_byte_index(filter_buffer, *cursor_pos);
+                    let byte_idx = char_to_byte_index(filter_buffer, *cursor_pos);
                     filter_buffer.insert(byte_idx, c);
                     *cursor_pos += 1;
                     *filtered_indices = options
@@ -2010,7 +2011,7 @@ impl EditorState {
                 KeyCode::Backspace => {
                     if *cursor_pos > 0 {
                         *cursor_pos -= 1;
-                        let byte_idx = Self::char_to_byte_index(filter_buffer, *cursor_pos);
+                        let byte_idx = char_to_byte_index(filter_buffer, *cursor_pos);
                         filter_buffer.remove(byte_idx);
                         *filtered_indices = options
                             .iter()
@@ -2063,14 +2064,14 @@ impl EditorState {
                     self.edit_mode = EditMode::Normal;
                 }
                 KeyCode::Up if *selected > 0 => {
-                    self.tooltip_scroll_offset = 0;
+                    self.tooltip.reset_scroll();
                     *selected -= 1;
                     if *selected < *scroll_offset {
                         *scroll_offset = *selected;
                     }
                 }
                 KeyCode::Down if *selected + 1 < filtered_indices.len() => {
-                    self.tooltip_scroll_offset = 0;
+                    self.tooltip.reset_scroll();
                     *selected += 1;
                     let visible = self.dropdown_visible_items;
                     if visible > 0 && *selected >= *scroll_offset + visible {
@@ -2078,17 +2079,17 @@ impl EditorState {
                     }
                 }
                 KeyCode::PageUp => {
-                    if self.is_tooltip_active() {
+                    if self.tooltip.is_active(self) {
                         self.scroll_tooltip(-1);
                     }
                 }
                 KeyCode::PageDown => {
-                    if self.is_tooltip_active() {
+                    if self.tooltip.is_active(self) {
                         self.scroll_tooltip(1);
                     }
                 }
                 KeyCode::Char(c) => {
-                    let byte_idx = Self::char_to_byte_index(filter_buffer, *cursor_pos);
+                    let byte_idx = char_to_byte_index(filter_buffer, *cursor_pos);
                     filter_buffer.insert(byte_idx, c);
                     *cursor_pos += 1;
                     *filtered_indices = options
@@ -2105,7 +2106,7 @@ impl EditorState {
                 KeyCode::Backspace => {
                     if *cursor_pos > 0 {
                         *cursor_pos -= 1;
-                        let byte_idx = Self::char_to_byte_index(filter_buffer, *cursor_pos);
+                        let byte_idx = char_to_byte_index(filter_buffer, *cursor_pos);
                         filter_buffer.remove(byte_idx);
                         *filtered_indices = options
                             .iter()
@@ -2142,105 +2143,12 @@ impl EditorState {
     }
 }
 
-pub(crate) fn to_json_pointer(path: &[String]) -> String {
-    if path.is_empty() {
-        return "".to_string();
-    }
-    let mut s = String::new();
-    for p in path {
-        s.push('/');
-        s.push_str(&p.replace('~', "~0").replace('/', "~1"));
-    }
-    s
-}
-
-pub(crate) fn find_changed_paths(
-    v1: &Value,
-    v2: &Value,
-    current_path: Vec<String>,
-    changed: &mut Vec<Vec<String>>,
-) {
-    if v1 != v2 {
-        changed.push(current_path.clone());
-        match (v1, v2) {
-            (Value::Object(map1), Value::Object(map2)) => {
-                let keys: std::collections::HashSet<_> = map1.keys().chain(map2.keys()).collect();
-                for k in keys {
-                    let mut next_path = current_path.clone();
-                    next_path.push(k.clone());
-                    let default_val = Value::Null;
-                    let val1 = map1.get(k).unwrap_or(&default_val);
-                    let val2 = map2.get(k).unwrap_or(&default_val);
-                    find_changed_paths(val1, val2, next_path, changed);
-                }
-            }
-            (Value::Array(arr1), Value::Array(arr2)) => {
-                let max_len = arr1.len().max(arr2.len());
-                for i in 0..max_len {
-                    let mut next_path = current_path.clone();
-                    next_path.push(i.to_string());
-                    let default_val = Value::Null;
-                    let val1 = arr1.get(i).unwrap_or(&default_val);
-                    let val2 = arr2.get(i).unwrap_or(&default_val);
-                    find_changed_paths(val1, val2, next_path, changed);
-                }
-            }
-            _ => {}
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::format::Format;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use serde_json::json;
-
-    #[test]
-    fn test_tooltip_scroll_offset() {
-        let data = json!({ "key": "value" });
-        let mut state = EditorState::new(data, Format::Json, None, None);
-        assert_eq!(state.tooltip_scroll_offset, 0);
-
-        state.scroll_tooltip(1);
-        assert_eq!(state.tooltip_scroll_offset, 1);
-
-        state.scroll_tooltip(5);
-        assert_eq!(state.tooltip_scroll_offset, 6);
-
-        state.scroll_tooltip(-2);
-        assert_eq!(state.tooltip_scroll_offset, 4);
-
-        state.scroll_tooltip(-10);
-        assert_eq!(state.tooltip_scroll_offset, 0); // saturating
-
-        // Tooltip scroll keybind test (PageUp/PageDown)
-        // Should only work when tooltip is active
-        // Setup Dropdown mode
-        state.edit_mode = EditMode::Dropdown {
-            options: vec!["opt1".to_string()],
-            descriptions: vec![Some("Some description".to_string())],
-            selected: 0,
-            scroll_offset: 0,
-            filter_buffer: String::new(),
-            filtered_indices: vec![0],
-        };
-
-        assert!(state.is_tooltip_active());
-
-        // Scroll via PageDown
-        let page_down_event = KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE);
-        let action = state.handle_key_event(page_down_event);
-        assert!(matches!(action, crate::action::Action::Noop));
-        assert_eq!(state.tooltip_scroll_offset, 1);
-
-        // Scroll via PageUp
-        let page_up_event = KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE);
-        let action = state.handle_key_event(page_up_event);
-        assert!(matches!(action, crate::action::Action::Noop));
-        assert_eq!(state.tooltip_scroll_offset, 0);
-    }
 
     #[test]
     fn test_auto_adjust_expansion() {
@@ -2314,7 +2222,7 @@ mod tests {
         };
 
         state.handle_key_event(event);
-        assert_eq!(state.data, json!({"b": 2}));
+        assert_eq!(state.active_value(), json!({"b": 2}));
     }
 
     #[test]
@@ -2347,7 +2255,7 @@ mod tests {
             .add_child_node(&[], Some("new_key".to_string()), json!("value"))
             .unwrap();
 
-        assert_eq!(state.data["new_key"], "value");
+        assert_eq!(state.active_value()["new_key"], "value");
         // Root + 1 child
         assert_eq!(state.flattened_nodes.len(), 2);
     }
@@ -2359,7 +2267,7 @@ mod tests {
         state.add_child_node(&[], None, json!(1)).unwrap();
         state.add_child_node(&[], None, json!(2)).unwrap();
 
-        assert_eq!(state.data, json!([1, 2]));
+        assert_eq!(state.active_value(), json!([1, 2]));
     }
 
     #[test]
@@ -2368,8 +2276,44 @@ mod tests {
         let mut state = EditorState::new(data, Format::Json, None, None);
         state.delete_node(&["a".to_string()]).unwrap();
 
-        assert_eq!(state.data, json!({"b": 2}));
+        assert_eq!(state.active_value(), json!({"b": 2}));
         assert_eq!(state.flattened_nodes.len(), 2); // root + "b"
+    }
+
+    #[test]
+    fn test_add_empty_array_item_persists_on_save() {
+        // C3.1: adding an item to an empty array then saving must not drop it.
+        // Regression guard: relies on root-array block serialization (C5.1-1).
+        let data = crate::format::parse("[]", crate::format::Format::Yaml).unwrap();
+        let mut state = EditorState::new(
+            data,
+            crate::format::Format::Yaml,
+            None,
+            Some("[]".to_string()),
+        );
+        state.selected = 0; // root
+        crate::edit::trigger_add_child(&mut state); // adds unedited (null) item, enters edit
+        let out = crate::format::serialize_annotated(
+            &state.nodes,
+            state.root,
+            crate::format::Format::Yaml,
+        )
+        .unwrap();
+        // Root array must serialize as a block array, NOT a mapping like "0: ".
+        assert!(out.contains("- "), "expected block array, got:\n{}", out);
+        assert!(
+            !out.contains("0:"),
+            "root array must not serialize as mapping:\n{}",
+            out
+        );
+        // Round trip must preserve the item.
+        let reparsed = crate::format::parse(&out, crate::format::Format::Yaml).unwrap();
+        assert_eq!(
+            reparsed,
+            json!([null]),
+            "added item must persist, got: {}",
+            reparsed
+        );
     }
 
     #[test]
@@ -2378,10 +2322,23 @@ mod tests {
         let mut state = EditorState::new(data, Format::Json, None, None);
         state.delete_node(&["1".to_string()]).unwrap(); // delete '2'
 
-        assert_eq!(state.data, json!([1, 3]));
+        assert_eq!(state.active_value(), json!([1, 3]));
         // Check flattened paths
         assert_eq!(state.flattened_nodes[1].path, vec!["0".to_string()]);
         assert_eq!(state.flattened_nodes[2].path, vec!["1".to_string()]);
+    }
+
+    #[test]
+    fn test_delete_node_adjusts_selected_before_cursor() {
+        let data = json!([1, 2, 3]);
+        let mut state = EditorState::new(data, Format::Json, None, None);
+        // Root(0), [0](1), [1](2), [2](3)
+        state.selected = 2; // select [1] = 2
+        state.delete_node(&["0".to_string()]).unwrap(); // delete [0] = 1
+        // After: [0]=2, [1]=3. deleted_flat_pos=1 < selected=2 → selected shifts to 1
+        assert_eq!(state.selected, 1);
+        assert_eq!(state.flattened_nodes[1].path, vec!["0".to_string()]);
+        assert_eq!(state.flattened_nodes[1].value_display, "2");
     }
 
     #[test]
@@ -2395,6 +2352,85 @@ mod tests {
     }
 
     #[test]
+    fn test_addable_keys_reeappear_after_delete() {
+        use crate::edit::get_addable_keys_with_descriptions;
+        let data = json!({"b": 2});
+        let mut state = EditorState::new(data, Format::Json, None, None);
+        state.schema = Some(json!({
+            "type": "object",
+            "properties": {
+                "a": { "type": "integer" },
+                "b": { "type": "integer" },
+                "c": { "type": "integer" }
+            }
+        }));
+
+        // Initial check: "a" and "c" are addable, "b" is not (already exists)
+        let addable = get_addable_keys_with_descriptions(&state, &[]);
+        let keys: Vec<String> = addable.iter().map(|(k, _)| k.clone()).collect();
+        assert!(keys.contains(&"a".to_string()));
+        assert!(!keys.contains(&"b".to_string()));
+        assert!(keys.contains(&"c".to_string()));
+
+        // Add "a"
+        state
+            .add_child_node(&[], Some("a".to_string()), json!(1))
+            .unwrap();
+        let addable = get_addable_keys_with_descriptions(&state, &[]);
+        let keys: Vec<String> = addable.iter().map(|(k, _)| k.clone()).collect();
+        assert!(!keys.contains(&"a".to_string()));
+
+        // Delete "a"
+        state.delete_node(&["a".to_string()]).unwrap();
+        let addable = get_addable_keys_with_descriptions(&state, &[]);
+        let keys: Vec<String> = addable.iter().map(|(k, _)| k.clone()).collect();
+        // "a" should reappear
+        assert!(keys.contains(&"a".to_string()));
+        assert!(!keys.contains(&"b".to_string()));
+        assert!(keys.contains(&"c".to_string()));
+    }
+
+    #[test]
+    fn test_parent_value_synced_after_delete() {
+        let data = json!({"arr": [1, 2, 3]});
+        let mut state = EditorState::new(data, Format::Json, None, None);
+
+        // Delete element 2 (index 1) in arr
+        state
+            .delete_node(&["arr".to_string(), "1".to_string()])
+            .unwrap();
+
+        // The parent array ("arr")'s value should be updated to [1, 3]
+        let arr_node = state.node_at_path(&["arr".to_string()]).unwrap();
+        assert_eq!(arr_node.value, json!([1, 3]));
+
+        // The root's value should also be updated to {"arr": [1, 3]}
+        let root_node = state.node_at_path(&[]).unwrap();
+        assert_eq!(root_node.value, json!({"arr": [1, 3]}));
+    }
+
+    #[test]
+    fn test_readd_node_value_edit_targets_active_node() {
+        // Regression: after deleting a node and re-adding the same key, the
+        // tombstoned (inactive) node coexists with the new active one. A value
+        // edit must target the ACTIVE node, otherwise the typed value is lost
+        // (written to the invisible tombstone) and not saved.
+        let data = json!({"age": 1});
+        let mut state = EditorState::new(data, Format::Json, None, None);
+        state.delete_node(&["age".to_string()]).unwrap();
+        // Re-add "age": now an inactive tombstone AND a new active node share the path.
+        state
+            .add_child_node(&[], Some("age".to_string()), Value::Null)
+            .unwrap();
+
+        if let Some(v) = state.node_at_path_mut_value(&["age".to_string()]) {
+            *v = json!(42);
+        }
+        // The active value must reflect the edit (not stay null / tombstoned).
+        assert_eq!(state.active_value()["age"], json!(42));
+    }
+
+    #[test]
     fn test_undo_redo_basic() {
         let data = json!({"a": 1});
         let mut state = EditorState::new(data, Format::Json, None, None);
@@ -2402,18 +2438,19 @@ mod tests {
         // 1. Save initial state
         state.save_to_undo();
 
-        // 2. Modify data
-        state.data = json!({"a": 2});
+        // 2. Modify data (simulate change by adding a child with value override)
+        state.node_at_path_mut(&["a".to_string()]).unwrap().value = json!(2);
+        state.rebuild_flattened();
         state.selected = 10;
 
         // 3. Perform Undo
         state.undo();
-        assert_eq!(state.data, json!({"a": 1}));
+        assert_eq!(state.active_value(), json!({"a": 1}));
         assert_eq!(state.selected, 0);
 
         // 4. Perform Redo
         state.redo();
-        assert_eq!(state.data, json!({"a": 2}));
+        assert_eq!(state.active_value(), json!({"a": 2}));
         assert_eq!(state.selected, 10);
     }
 
@@ -2423,15 +2460,15 @@ mod tests {
 
         // 1. Delete "a" (save_to_undo is called internally in delete_node)
         state.delete_node(&["a".to_string()]).unwrap();
-        assert_eq!(state.data, json!({"b": 2}));
+        assert_eq!(state.active_value(), json!({"b": 2}));
 
         // 2. Perform Undo
         state.undo();
-        assert_eq!(state.data, json!({"a": 1, "b": 2}));
+        assert_eq!(state.active_value(), json!({"a": 1, "b": 2}));
 
         // 3. Perform Redo
         state.redo();
-        assert_eq!(state.data, json!({"b": 2}));
+        assert_eq!(state.active_value(), json!({"b": 2}));
     }
 
     #[test]
@@ -2469,7 +2506,8 @@ mod tests {
 
         // 1. Change data
         state.save_to_undo();
-        state.data = json!({"a": 2});
+        state.node_at_path_mut(&["a".to_string()]).unwrap().value = json!(2);
+        state.rebuild_flattened();
         assert!(state.is_dirty);
 
         // 2. Undo -> stack becomes empty, should be not dirty
@@ -2497,7 +2535,8 @@ mod tests {
 
         // 2. Dirty -> Esc should enter SavePrompt mode
         state.save_to_undo();
-        state.data = json!({"a": 2});
+        state.node_at_path_mut(&["a".to_string()]).unwrap().value = json!(2);
+        state.rebuild_flattened();
         let event = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
         let action = state.handle_key_event(event);
         assert!(matches!(action, Action::Noop));
@@ -2604,25 +2643,25 @@ mod tests {
 
         // Move up: [2, 1, 3]
         state.move_node_up();
-        assert_eq!(state.data, json!([2, 1, 3]));
+        assert_eq!(state.active_value(), json!([2, 1, 3]));
         assert_eq!(state.selected, 1); // Follow the moved node
         assert_eq!(state.flattened_nodes[state.selected].value_display, "2");
 
         // Move down: [1, 2, 3]
         state.move_node_down();
-        assert_eq!(state.data, json!([1, 2, 3]));
+        assert_eq!(state.active_value(), json!([1, 2, 3]));
         assert_eq!(state.selected, 2);
         assert_eq!(state.flattened_nodes[state.selected].value_display, "2");
 
         // Move down again: [1, 3, 2]
         state.move_node_down();
-        assert_eq!(state.data, json!([1, 3, 2]));
+        assert_eq!(state.active_value(), json!([1, 3, 2]));
         assert_eq!(state.selected, 3);
         assert_eq!(state.flattened_nodes[state.selected].value_display, "2");
 
         // Undo
         state.undo();
-        assert_eq!(state.data, json!([1, 2, 3]));
+        assert_eq!(state.active_value(), json!([1, 2, 3]));
         assert_eq!(state.selected, 2);
     }
 
@@ -2637,28 +2676,32 @@ mod tests {
 
         // Move up: {"b": 2, "a": 1, "c": 3}
         state.move_node_up();
-        let keys: Vec<_> = state.data.as_object().unwrap().keys().collect::<Vec<_>>();
+        let av = state.active_value();
+        let keys: Vec<_> = av.as_object().unwrap().keys().collect::<Vec<_>>();
         assert_eq!(keys, vec!["b", "a", "c"]);
         assert_eq!(state.selected, 1); // Follow "b"
         assert_eq!(state.flattened_nodes[state.selected].key, "b");
 
         // Move down: {"a": 1, "b": 2, "c": 3}
         state.move_node_down();
-        let keys: Vec<_> = state.data.as_object().unwrap().keys().collect::<Vec<_>>();
+        let av = state.active_value();
+        let keys: Vec<_> = av.as_object().unwrap().keys().collect::<Vec<_>>();
         assert_eq!(keys, vec!["a", "b", "c"]);
         assert_eq!(state.selected, 2);
         assert_eq!(state.flattened_nodes[state.selected].key, "b");
 
         // Move down again: {"a": 1, "c": 3, "b": 2}
         state.move_node_down();
-        let keys: Vec<_> = state.data.as_object().unwrap().keys().collect::<Vec<_>>();
+        let av = state.active_value();
+        let keys: Vec<_> = av.as_object().unwrap().keys().collect::<Vec<_>>();
         assert_eq!(keys, vec!["a", "c", "b"]);
         assert_eq!(state.selected, 3);
         assert_eq!(state.flattened_nodes[state.selected].key, "b");
 
         // Undo
         state.undo();
-        let keys: Vec<_> = state.data.as_object().unwrap().keys().collect::<Vec<_>>();
+        let av = state.active_value();
+        let keys: Vec<_> = av.as_object().unwrap().keys().collect::<Vec<_>>();
         assert_eq!(keys, vec!["a", "b", "c"]);
         assert_eq!(state.selected, 2);
     }
@@ -2738,7 +2781,7 @@ mod tests {
         assert_eq!(state.flattened_nodes.len(), 2); // root and "a"
 
         // Enter search mode
-        let event = KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE);
+        let event = KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE);
         state.handle_key_event(event);
         assert!(matches!(state.edit_mode, EditMode::SearchPrompt { .. }));
 
@@ -2782,7 +2825,7 @@ mod tests {
         let mut state = EditorState::new(data, crate::format::Format::Json, None, None);
 
         // 1. Enter search mode
-        state.handle_key_event(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+        state.handle_key_event(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
         assert!(matches!(state.edit_mode, EditMode::SearchPrompt { .. }));
         assert_eq!(state.search_total_matches, 0);
         assert_eq!(state.search_current_match_index, 0);
@@ -2817,7 +2860,7 @@ mod tests {
         assert_eq!(state.search_total_matches, 0);
 
         // 6. Enter to confirm (keeps search active, goes to next match)
-        state.handle_key_event(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+        state.handle_key_event(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
         state.handle_key_event(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
 
         // First match is index 1 ("key1")
@@ -2856,7 +2899,7 @@ mod tests {
         let mut state = EditorState::new(data, crate::format::Format::Json, None, None);
 
         // 1. Search for "target"
-        state.handle_key_event(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+        state.handle_key_event(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
 
         // Type 't'
         state.handle_key_event(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE));
@@ -2900,7 +2943,7 @@ mod tests {
         let mut state = EditorState::new(data, crate::format::Format::Json, None, None);
 
         // Scenario 1: SearchPrompt with results + ESC -> Normal mode, search_query remains
-        state.handle_key_event(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+        state.handle_key_event(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
         state.handle_key_event(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
         assert_eq!(state.search_total_matches, 2);
 
@@ -2923,7 +2966,7 @@ mod tests {
         assert_eq!(state.search_total_matches, 0);
 
         // Scenario 2: SearchPrompt with NO results + ESC -> Reset immediately
-        state.handle_key_event(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+        state.handle_key_event(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
         state.handle_key_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
         assert_eq!(state.search_total_matches, 0);
 
@@ -2935,7 +2978,7 @@ mod tests {
         );
 
         // Scenario 3: SearchPrompt with EMPTY buffer + ESC -> Reset immediately
-        state.handle_key_event(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+        state.handle_key_event(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
         assert_eq!(state.search_total_matches, 0);
 
         state.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
@@ -2992,7 +3035,7 @@ mod tests {
         apply_edit(&mut state);
 
         // 5. Verify result
-        assert_eq!(state.data, serde_json::json!({"key": "val"}));
+        assert_eq!(state.active_value(), serde_json::json!({"key": "val"}));
         assert_eq!(state.flattened_nodes[1].key, "key");
     }
 
@@ -3035,7 +3078,10 @@ mod tests {
         apply_edit(&mut state);
 
         // 4. Verify result
-        assert_eq!(state.data, serde_json::json!({"config": {"theme": "dark"}}));
+        assert_eq!(
+            state.active_value(),
+            serde_json::json!({"config": {"theme": "dark"}})
+        );
         assert_eq!(state.flattened_nodes[1].key, "config");
     }
 
@@ -3056,9 +3102,11 @@ mod tests {
         state.save_to_undo();
 
         // 2. Modify "nested/key"
-        let key_pointer = to_json_pointer(&["nested".to_string(), "key".to_string()]);
-        if let Some(val) = state.data.pointer_mut(&key_pointer) {
-            *val = serde_json::json!("new_value");
+        {
+            let key_path = vec!["nested".to_string(), "key".to_string()];
+            if let Some(val) = state.node_at_path_mut(&key_path) {
+                val.value = serde_json::json!("new_value");
+            }
         }
         state.rebuild_flattened();
 
@@ -3150,7 +3198,7 @@ mod tests {
         // 'd' without modifiers should delete the selected node
         let event = KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE);
         state.handle_key_event(event);
-        assert_eq!(state.data, json!({"b": 2}));
+        assert_eq!(state.active_value(), json!({"b": 2}));
 
         // Reset and test 'Ctrl+d'
         let data = json!({"a": 1, "b": 2});
@@ -3158,7 +3206,7 @@ mod tests {
         state.selected = 1;
         let event = KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL);
         state.handle_key_event(event);
-        assert_eq!(state.data, json!({"a": 1, "b": 2}));
+        assert_eq!(state.active_value(), json!({"a": 1, "b": 2}));
     }
 
     #[test]
@@ -3183,5 +3231,579 @@ mod tests {
 
         assert!(matches!(state.edit_mode, EditMode::Normal));
         assert!(state.scroll_to_selected);
+    }
+
+    #[test]
+    fn test_toggle_comment() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let original_text = "a: 1\nb: 2\nc: 3\n";
+        let data = crate::format::parse(original_text, Format::Yaml).unwrap();
+        let mut state = EditorState::new(data, Format::Yaml, None, Some(original_text.to_string()));
+
+        state.selected = 2; // root=0, a=1, b=2, c=3
+        assert_eq!(state.flattened_nodes[state.selected].key, "b");
+
+        let event = KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE);
+        state.handle_key_event(event);
+
+        assert_eq!(state.active_value(), serde_json::json!({"a": 1, "c": 3}));
+        assert!(state.flattened_nodes[2].is_disabled_comment);
+        assert_eq!(state.flattened_nodes[2].key, "b");
+
+        state.handle_key_event(event);
+
+        assert_eq!(
+            state.active_value(),
+            serde_json::json!({"a": 1, "b": 2, "c": 3})
+        );
+        assert!(!state.flattened_nodes[2].is_disabled_comment);
+        assert_eq!(state.flattened_nodes[2].key, "b");
+    }
+
+    #[test]
+    #[ignore] // Phase 3: from-text reparse will correct ordering
+    fn test_toggle_middle_comment_orders() {
+        use crate::format::parse;
+        let yaml = "services:\n  hermes:\n    build:\n      dockerfile: Dockerfile.hermes\n    image: localhost/hermes-agent:latest\n    container_name: hermes\n    # restart: unless-stopped\n    command: gateway run\n    network_mode: host\n    environment:\n      CONTAINER_HOST: unix:///run/docker/docker.sock\n    ports:\n      - \"9119:9119\"\n    volumes:\n      - hermes-data:/opt/data\n      - /mnt/wsl/projects:/projects\n";
+        let data = parse(yaml, Format::Yaml).unwrap();
+        let mut state = EditorState::new(data, Format::Yaml, None, Some(yaml.to_string()));
+        // expand services
+        state.selected = state
+            .flattened_nodes
+            .iter()
+            .position(|n| n.path == vec!["services".to_string()])
+            .unwrap();
+        crate::navigate::toggle_expand(&mut state);
+        // expand hermes
+        state.selected = state
+            .flattened_nodes
+            .iter()
+            .position(|n| n.path == vec!["services".to_string(), "hermes".to_string()])
+            .unwrap();
+        crate::navigate::toggle_expand(&mut state);
+        let hc = |st: &EditorState| -> Vec<String> {
+            st.flattened_nodes
+                .iter()
+                .filter(|n| n.path.len() == 3 && n.path[0] == "services" && n.path[1] == "hermes")
+                .map(|n| n.key.clone())
+                .collect()
+        };
+        let idx = state
+            .flattened_nodes
+            .iter()
+            .position(|n| {
+                n.path
+                    == vec![
+                        "services".to_string(),
+                        "hermes".to_string(),
+                        "image".to_string(),
+                    ]
+            })
+            .expect("image node");
+        state.selected = idx;
+        state.toggle_comment().unwrap();
+        let after = hc(&state);
+        assert_eq!(
+            after,
+            vec![
+                "build",
+                "image",
+                "container_name",
+                "restart",
+                "command",
+                "network_mode",
+                "environment",
+                "ports",
+                "volumes"
+            ],
+            "commenting a MIDDLE key must not reorder sibling keys (IndexMap swap_remove bug)"
+        );
+    }
+
+    #[test]
+    fn test_toggle_comment_array_multiple() {
+        // Bug: Commenting apple then banana should comment both, not skip to cherry
+        let yaml = "items:\n  - apple\n  - banana\n  - cherry\n  - date\n  - elderberry\n";
+        let data = crate::format::parse(yaml, Format::Yaml).unwrap();
+        let mut state = EditorState::new(data, Format::Yaml, None, Some(yaml.to_string()));
+
+        // Expand items array
+        state.selected = state
+            .flattened_nodes
+            .iter()
+            .position(|n| n.path == vec!["items".to_string()])
+            .unwrap();
+        crate::navigate::toggle_expand(&mut state);
+
+        // Select first array item (apple)
+        let first_item = state
+            .flattened_nodes
+            .iter()
+            .position(|n| n.path.len() == 2 && n.path[0] == "items" && !n.is_disabled_comment)
+            .expect("first item should exist");
+        state.selected = first_item;
+
+        // Comment apple
+        state.toggle_comment().unwrap();
+
+        // Find next non-disabled item (should be banana)
+        let banana_idx = state
+            .flattened_nodes
+            .iter()
+            .position(|n| n.path.len() == 2 && n.path[0] == "items" && !n.is_disabled_comment);
+        assert!(
+            banana_idx.is_some(),
+            "banana should still exist after commenting apple"
+        );
+        state.selected = banana_idx.unwrap();
+
+        // Comment banana
+        state.toggle_comment().unwrap();
+
+        // Verify both items are commented (2 disabled nodes)
+        let commented: Vec<_> = state
+            .flattened_nodes
+            .iter()
+            .filter(|n| n.path.len() == 2 && n.path[0] == "items" && n.is_disabled_comment)
+            .collect();
+        assert_eq!(commented.len(), 2, "Should have 2 commented items");
+
+        // Verify active value has only 3 items (cherry, date, elderberry)
+        let active = state.active_value();
+        let arr = active.pointer("/items").unwrap().as_array().unwrap();
+        assert_eq!(arr.len(), 3, "Array should have 3 items after commenting 2");
+    }
+
+    #[test]
+    fn test_toggle_comment_array_last() {
+        // Bug: Commenting last item fails with "Node value not found"
+        let yaml = "items:\n  - apple\n  - banana\n  - cherry\n";
+        let data = crate::format::parse(yaml, Format::Yaml).unwrap();
+        let mut state = EditorState::new(data, Format::Yaml, None, Some(yaml.to_string()));
+
+        // Expand items
+        state.selected = state
+            .flattened_nodes
+            .iter()
+            .position(|n| n.path == vec!["items".to_string()])
+            .unwrap();
+        crate::navigate::toggle_expand(&mut state);
+
+        // Find last non-disabled item (cherry)
+        let last_item = state
+            .flattened_nodes
+            .iter()
+            .rposition(|n| n.path.len() == 2 && n.path[0] == "items" && !n.is_disabled_comment)
+            .expect("last item should exist");
+        state.selected = last_item;
+
+        // Comment should succeed
+        let result = state.toggle_comment();
+        assert!(
+            result.is_ok(),
+            "Commenting last item should succeed, got: {:?}",
+            result.err()
+        );
+
+        // Verify an item is commented
+        let disabled_count = state
+            .flattened_nodes
+            .iter()
+            .filter(|n| n.path.len() == 2 && n.path[0] == "items" && n.is_disabled_comment)
+            .count();
+        assert_eq!(disabled_count, 1, "One item should be disabled");
+    }
+
+    #[test]
+    fn test_toggle_comment_array_uncomment_no_duplicate() {
+        // Bug: Uncommenting causes duplicate entries (comment + value coexist)
+        // With node-based toggle: uncomment just flips is_active back.
+        // Since parse_annotated already creates disabled nodes from "# - apple",
+        // uncommenting means: is_active = true → apple reappears in active_value.
+        // NOTE: The old data-removal model inserted the value back into data.
+        // The new node model simply flips is_active. The disabled node was already
+        // in the vec from parse_annotated, so flip makes it active.
+        let yaml = "items:\n  - apple\n  - banana\n  - cherry\n";
+        let data = crate::format::parse(yaml, Format::Yaml).unwrap();
+        let mut state = EditorState::new(data, Format::Yaml, None, Some(yaml.to_string()));
+
+        // Expand items
+        state.selected = state
+            .flattened_nodes
+            .iter()
+            .position(|n| n.path == vec!["items".to_string()])
+            .unwrap();
+        crate::navigate::toggle_expand(&mut state);
+
+        // All items are active (yaml had no commented items in data)
+        // Comment apple first, then uncomment it
+        let apple_active = state
+            .flattened_nodes
+            .iter()
+            .position(|n| n.path.len() == 2 && n.path[0] == "items" && !n.is_disabled_comment);
+        assert!(apple_active.is_some(), "apple should be active");
+        state.selected = apple_active.unwrap();
+
+        // Comment apple
+        state.toggle_comment().unwrap();
+
+        // Now find the disabled apple
+        let apple_disabled = state
+            .flattened_nodes
+            .iter()
+            .position(|n| n.path.len() == 2 && n.path[0] == "items" && n.is_disabled_comment);
+        assert!(apple_disabled.is_some(), "apple should now be disabled");
+        state.selected = apple_disabled.unwrap();
+
+        // Uncomment
+        state.toggle_comment().unwrap();
+
+        // Verify active value has all 3 items
+        let active = state.active_value();
+        let arr = active.pointer("/items").unwrap().as_array().unwrap();
+        assert_eq!(arr.len(), 3, "Array should have 3 items after uncommenting");
+
+        // Verify no disabled nodes remain
+        let disabled_count = state
+            .flattened_nodes
+            .iter()
+            .filter(|n| n.path.len() == 2 && n.path[0] == "items" && n.is_disabled_comment)
+            .count();
+        assert_eq!(disabled_count, 0, "No disabled nodes should remain");
+    }
+
+    #[test]
+    fn test_toggle_comment_array_jsonc_rendering() {
+        // Bug: After commenting first item, second item disappears from UI
+        let jsonc = "{\n  \"items\": [\n    \"apple\",\n    \"banana\",\n    \"cherry\"\n  ]\n}\n";
+        let data = crate::format::parse(jsonc, Format::Jsonc).unwrap();
+        let mut state = EditorState::new(data, Format::Jsonc, None, Some(jsonc.to_string()));
+
+        // Expand items
+        state.selected = state
+            .flattened_nodes
+            .iter()
+            .position(|n| n.path == vec!["items".to_string()])
+            .unwrap();
+        crate::navigate::toggle_expand(&mut state);
+
+        // Count visible (non-disabled) items before
+        let visible_before = state
+            .flattened_nodes
+            .iter()
+            .filter(|n| n.path.len() == 2 && n.path[0] == "items" && !n.is_disabled_comment)
+            .count();
+        assert_eq!(visible_before, 3);
+
+        // Select and comment first item (apple)
+        let first_item = state
+            .flattened_nodes
+            .iter()
+            .position(|n| n.path.len() == 2 && n.path[0] == "items" && !n.is_disabled_comment)
+            .expect("first item should exist");
+        state.selected = first_item;
+        state.toggle_comment().unwrap();
+
+        // Count visible items after - banana should still be visible
+        let visible_after = state
+            .flattened_nodes
+            .iter()
+            .filter(|n| n.path.len() == 2 && n.path[0] == "items" && !n.is_disabled_comment)
+            .count();
+        assert_eq!(
+            visible_after, 2,
+            "banana and cherry should still be visible after commenting apple"
+        );
+    }
+
+    /// Phase 2: save with no edits must preserve above/inline comments via original_text merge.
+    #[test]
+    fn test_save_preserves_comments_yaml() {
+        let original = r#"# System Configuration
+app:
+  name: clise # Application name
+  # Server settings
+  server:
+    host: 127.0.0.1
+    port: 8080
+"#;
+        let data = crate::format::parse(original, Format::Yaml).unwrap();
+        let state = EditorState::new(data, Format::Yaml, None, Some(original.to_string()));
+
+        let out =
+            crate::format::serialize_annotated(&state.nodes, state.root, Format::Yaml).unwrap();
+
+        assert!(
+            out.contains("# System Configuration"),
+            "file header lost: {}",
+            out
+        );
+        assert!(
+            out.contains("# Application name") || out.contains("name: clise # Application name"),
+            "inline comment lost: {}",
+            out
+        );
+        assert!(
+            out.contains("# Server settings"),
+            "above comment lost: {}",
+            out
+        );
+    }
+
+    /// Phase 2: disabled array items must survive save via original_text merge.
+    #[test]
+    fn test_save_preserves_disabled_yaml() {
+        let original = "items:\n  - apple\n  # - banana\n  - cherry\n";
+        let data = crate::format::parse(original, Format::Yaml).unwrap();
+        let state = EditorState::new(data, Format::Yaml, None, Some(original.to_string()));
+
+        let out =
+            crate::format::serialize_annotated(&state.nodes, state.root, Format::Yaml).unwrap();
+
+        assert!(
+            out.contains("# - banana") || out.contains("#- banana"),
+            "disabled item lost on save: {}",
+            out
+        );
+        assert!(out.contains("apple"), "active apple lost: {}", out);
+        assert!(out.contains("cherry"), "active cherry lost: {}", out);
+    }
+
+    /// Phase 2: JSONC comments preserved on save with original_text.
+    #[test]
+    fn test_save_preserves_jsonc() {
+        let original = r#"{
+  // above a
+  "a": 1, // inline a
+  "b": 2
+}
+"#;
+        let data = crate::format::parse(original, Format::Jsonc).unwrap();
+        let state = EditorState::new(data, Format::Jsonc, None, Some(original.to_string()));
+
+        let out =
+            crate::format::serialize_annotated(&state.nodes, state.root, Format::Jsonc).unwrap();
+
+        assert!(
+            out.contains("// above a") || out.contains("//above a"),
+            "above comment lost: {}",
+            out
+        );
+        assert!(
+            out.contains("// inline a") || out.contains("//inline a"),
+            "inline comment lost: {}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_rename_key_then_serialize() {
+        use crate::edit::apply_edit;
+        let original = "# header\n# above a\na: 1  # inline a\nb: 2\n";
+        let data = crate::format::parse(original, Format::Yaml).unwrap();
+        let mut state = EditorState::new(data, Format::Yaml, None, Some(original.to_string()));
+
+        // rename key "a" to "c"
+        state.selected = 1; // "a" node
+        state.edit_mode = EditMode::RenameKeyPrompt {
+            parent_path: vec![],
+            original_key: "a".to_string(),
+            buffer: "c".to_string(),
+            cursor_pos: 1,
+            value: serde_json::json!(1),
+        };
+        apply_edit(&mut state);
+
+        let out =
+            crate::format::serialize_annotated(&state.nodes, state.root, Format::Yaml).unwrap();
+
+        assert!(
+            out.contains("c: 1"),
+            "renamed key not serialized correctly: {}",
+            out
+        );
+        assert!(out.contains("# above a"), "comment preserved: {}", out);
+        assert!(out.contains("# inline a"), "comment preserved: {}", out);
+    }
+
+    #[test]
+    fn test_reorder_then_serialize() {
+        let original = "a: 1\nb: 2\n";
+        let data = crate::format::parse(original, Format::Yaml).unwrap();
+        let mut state = EditorState::new(data, Format::Yaml, None, Some(original.to_string()));
+
+        // Move "b" (selected = 2) up
+        state.selected = 2; // "b" node
+        state.move_node_up();
+
+        let out =
+            crate::format::serialize_annotated(&state.nodes, state.root, Format::Yaml).unwrap();
+
+        assert_eq!(out, "b: 2\na: 1\n");
+    }
+
+    #[test]
+    fn test_add_array_item_with_leading_commented_item_no_path_collision() {
+        // Regression: when the first array item is commented out, it retains its
+        // original index (items.0, inactive) while active items keep items.1/2.
+        // Adding a new item previously used arr.len() (active count) as the new
+        // index, producing items.2 — a DUPLICATE of the existing cherry node.
+        // That made find_node_by_path (used by start_edit) resolve to cherry,
+        // so the user would edit the wrong node.
+        let original = "items:\n  # - apple\n  - banana\n  - cherry\n";
+        let data = crate::format::parse(original, Format::Yaml).unwrap();
+        let mut state = EditorState::new(data, Format::Yaml, None, Some(original.to_string()));
+
+        state.selected = state
+            .flattened_nodes
+            .iter()
+            .position(|n| n.path == vec!["items".to_string()])
+            .unwrap();
+        crate::edit::trigger_add_child(&mut state);
+
+        // No two nodes may share the same path.
+        let mut paths: Vec<Vec<String>> = state.nodes.iter().map(|n| n.path.clone()).collect();
+        let before = paths.len();
+        paths.sort();
+        paths.dedup();
+        assert_eq!(before, paths.len(), "duplicate node paths after add");
+
+        // Selection must land on the newly added node (unique index), not cherry.
+        let sel = state.selected_node().expect("no selection").path.clone();
+        assert_eq!(sel, vec!["items".to_string(), "3".to_string()]);
+
+        // The commented item and both active items survive; new empty item appended.
+        let out =
+            crate::format::serialize_annotated(&state.nodes, state.root, Format::Yaml).unwrap();
+        assert!(out.contains("# - apple"), "commented item lost:\n{}", out);
+        assert!(out.contains("banana"), "banana lost:\n{}", out);
+        assert!(out.contains("cherry"), "cherry lost:\n{}", out);
+    }
+
+    #[test]
+    fn test_delete_disabled_node_from_array() {
+        let original = "items:\n  - apple\n  # - banana\n  - cherry\n  - date\n";
+        let data = crate::format::parse(original, Format::Yaml).unwrap();
+        let mut state = EditorState::new(data, Format::Yaml, None, Some(original.to_string()));
+
+        // Expand items
+        state.selected = state
+            .flattened_nodes
+            .iter()
+            .position(|n| n.path == vec!["items".to_string()])
+            .unwrap();
+        crate::navigate::toggle_expand(&mut state);
+
+        // Find disabled banana node
+        let banana_idx = state
+            .flattened_nodes
+            .iter()
+            .position(|n| n.path.len() == 2 && n.path[0] == "items" && n.is_disabled_comment)
+            .expect("disabled banana should exist");
+        state.selected = banana_idx;
+        let banana_path = state.selected_node().unwrap().path.clone();
+
+        // Delete disabled banana
+        state.delete_node(&banana_path).unwrap();
+
+        // No disabled nodes remain in items
+        let disabled_count = state
+            .flattened_nodes
+            .iter()
+            .filter(|n| n.path.len() == 2 && n.path[0] == "items" && n.is_disabled_comment)
+            .count();
+        assert_eq!(disabled_count, 0, "no disabled nodes should remain");
+
+        // Active items: apple, cherry, date (3 items)
+        let active_items: Vec<_> = state
+            .flattened_nodes
+            .iter()
+            .filter(|n| n.path.len() == 2 && n.path[0] == "items" && !n.is_disabled_comment)
+            .map(|n| n.value_display.clone())
+            .collect();
+        assert_eq!(active_items.len(), 3, "should have 3 active items");
+
+        // Serialized output: banana gone, apple/cherry/date remain
+        let out =
+            crate::format::serialize_annotated(&state.nodes, state.root, Format::Yaml).unwrap();
+        assert!(out.contains("apple"), "apple lost:\n{}", out);
+        assert!(out.contains("cherry"), "cherry lost:\n{}", out);
+        assert!(!out.contains("banana"), "banana still present:\n{}", out);
+    }
+
+    #[test]
+    fn test_delete_disabled_node_from_object() {
+        let yaml = "a: 1\n# b: 2\nc: 3\n";
+        let data = crate::format::parse(yaml, Format::Yaml).unwrap();
+        let mut state = EditorState::new(data, Format::Yaml, None, Some(yaml.to_string()));
+
+        // Find disabled "b" node
+        let b_idx = state
+            .flattened_nodes
+            .iter()
+            .position(|n| n.path == vec!["b".to_string()] && n.is_disabled_comment)
+            .expect("disabled b should exist");
+        state.selected = b_idx;
+        let b_path = state.selected_node().unwrap().path.clone();
+
+        state.delete_node(&b_path).unwrap();
+
+        // b gone, a and c remain
+        assert!(
+            !state.flattened_nodes.iter().any(|n| n.path == b_path),
+            "b should be gone"
+        );
+        let out =
+            crate::format::serialize_annotated(&state.nodes, state.root, Format::Yaml).unwrap();
+        assert!(out.contains("a: 1"), "a lost:\n{}", out);
+        assert!(out.contains("c: 3"), "c lost:\n{}", out);
+    }
+
+    #[test]
+    fn test_move_disabled_node_up_down_in_array() {
+        let original = "items:\n  - apple\n  # - banana\n  - cherry\n  - date\n";
+        let data = crate::format::parse(original, Format::Yaml).unwrap();
+        let mut state = EditorState::new(data, Format::Yaml, None, Some(original.to_string()));
+
+        // Expand items
+        state.selected = state
+            .flattened_nodes
+            .iter()
+            .position(|n| n.path == vec!["items".to_string()])
+            .unwrap();
+        crate::navigate::toggle_expand(&mut state);
+
+        // Disabled banana is at position 1 in children
+        let banana_idx = state
+            .flattened_nodes
+            .iter()
+            .position(|n| n.path.len() == 2 && n.path[0] == "items" && n.is_disabled_comment)
+            .expect("disabled banana should exist");
+        state.selected = banana_idx;
+
+        // Move down: banana should swap with cherry (active)
+        state.move_node_down();
+
+        // After move, banana should still be disabled, now after cherry in children
+        let banana_still = state
+            .flattened_nodes
+            .iter()
+            .position(|n| n.path.len() == 2 && n.path[0] == "items" && n.is_disabled_comment)
+            .expect("disabled banana should still exist after move");
+        assert!(banana_still > banana_idx, "banana should have moved down");
+
+        // Move up back
+        state.selected = banana_still;
+        state.move_node_up();
+
+        let banana_back = state
+            .flattened_nodes
+            .iter()
+            .position(|n| n.path.len() == 2 && n.path[0] == "items" && n.is_disabled_comment)
+            .expect("disabled banana should exist after move back");
+        assert!(
+            banana_back < banana_still,
+            "banana should have moved back up"
+        );
     }
 }

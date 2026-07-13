@@ -1,0 +1,8 @@
+id: L8.9
+title: Schema string + no quotes input → preserve as string
+fixture: fixtures/l8_9.jsonc
+schema: fixtures/schema.json
+size: 140x40
+keys: Down Enter Backspace type:123 Enter s
+expect_contains:
+  "name": "123"

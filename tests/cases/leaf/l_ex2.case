@@ -1,0 +1,7 @@
+id: L-EX2
+title: Leaf string edit then save
+fixture: fixtures/l1.jsonc
+size: 140x40
+keys: Down Backspace type:newname Enter s
+expect_contains:
+  "name": "newname"

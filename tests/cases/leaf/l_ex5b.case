@@ -1,0 +1,9 @@
+id: L-EX5b
+title: Type changes to number when quotes removed (edge case)
+fixture: fixtures/l8_2.jsonc
+size: 140x40
+keys: Right Down Enter Backspace Backspace Backspace Backspace Backspace type:123 Enter s
+expect_contains:
+  "v": 123
+expect_not_contains:
+  "v": "123"

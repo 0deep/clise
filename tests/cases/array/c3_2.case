@@ -1,0 +1,10 @@
+id: C3.2
+title: Add new item while first array item is commented
+fixture: fixtures/c2_1.yaml
+size: 140x40
+keys: Right Down / Up Enter type:newitem Enter s
+expect_contains:
+  # - apple
+  newitem
+  banana
+  cherry

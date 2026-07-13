@@ -1,0 +1,10 @@
+id: O3.3
+title: Delete commented (disabled) object key removes it entirely
+fixture: fixtures/o_comment.yaml
+size: 140x40
+keys: Down Down d s
+expect_contains:
+  a: 1
+  c: 3
+expect_not_contains:
+  b: 2

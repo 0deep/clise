@@ -1,0 +1,11 @@
+# Top-level (root) array delete+renumber verification. Serialized as Sequence like nested arrays.
+id: C9.1
+title: Top-level array delete then renumber
+fixture: fixtures/c5_1.yaml
+size: 140x40
+keys: Down Down d s
+expect_contains:
+  - 1
+  - 3
+expect_not_contains:
+  - 2

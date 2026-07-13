@@ -1,0 +1,7 @@
+id: L-EX5a
+title: Preserve quoted string (ambiguous string)
+fixture: fixtures/l8_2.jsonc
+size: 140x40
+keys: Right Down Enter Enter s
+expect_contains:
+  "v": "123"

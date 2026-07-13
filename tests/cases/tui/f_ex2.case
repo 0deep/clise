@@ -1,0 +1,8 @@
+id: F-EX2
+title: Add key via schema dropdown then save
+fixture: fixtures/empty.yaml
+schema: fixtures/schema.json
+size: 140x40
+keys: Right Enter Down Enter s
+expect_contains:
+  cfg:

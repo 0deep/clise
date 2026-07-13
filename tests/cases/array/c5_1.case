@@ -1,0 +1,10 @@
+id: C5.1
+title: Delete middle array item then renumber (nested array)
+fixture: fixtures/del_mid.yaml
+size: 140x40
+keys: Right Down Down d s
+expect_contains:
+  - 1
+  - 3
+expect_not_contains:
+  - 2

@@ -2,6 +2,7 @@
 crossterm = "=0.29.0"
 md5 = "=0.7.0"
 tui-input = "=0.15.3"
+tui-markdown = "=0.3.8"
 unicode-width = "=0.2.2"
 
 [dependencies.directories]
@@ -49,7 +50,7 @@ schema = [
 [package]
 edition = "2024"
 name = "clise"
-version = "0.2.2"
+version = "0.3.0"
 license = "MIT"
 description = "Core library for clise CLI/TUI utility"
 readme = "README.md"

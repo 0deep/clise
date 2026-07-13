@@ -14,13 +14,22 @@
 #![allow(clippy::single_match)]
 
 pub mod action;
+/// Comment parsing, classification, and preservation logic.
+pub mod comment;
 pub mod edit;
 pub mod flatten;
 pub mod format;
 pub mod navigate;
+pub mod node;
 pub mod render;
+pub mod schema_util;
 pub mod state;
 pub mod theme;
+pub mod tooltip;
+pub mod util;
+
+#[cfg(test)]
+mod diagnostic;
 
 #[cfg(feature = "schema")]
 pub mod config;

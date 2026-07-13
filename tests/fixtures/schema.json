@@ -1,0 +1,10 @@
+{
+  "type": "object",
+  "properties": {
+    "color": { "type": "string", "enum": ["red", "green", "blue"], "enumDescriptions": ["Red color", "Green color", "Blue color"] },
+    "cfg": { "oneOf": [ { "type": "object", "properties": { "kind": { "const": "a" } } }, { "type": "object", "properties": { "kind": { "const": "b" } } } ] },
+    "name": { "type": "string" },
+    "count": { "type": "number" },
+    "active": { "type": "boolean" }
+  }
+}

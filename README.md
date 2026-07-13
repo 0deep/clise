@@ -34,28 +34,17 @@ Using its core library, `clisé` provides a unified interface to edit structured
 
 Install `clisé` using the installation script via `curl` or `wget`:
 
-### User-local Installation (Default)
-This installs `clise` to `$HOME/.local/bin` without requiring root privileges:
-
 ```bash
-curl -o- https://raw.githubusercontent.com/0deep/clise/v0.2.2/install.sh | bash
+curl -o- https://raw.githubusercontent.com/0deep/clise/v0.3.0/install.sh | bash
 ```
 ```bash
-wget -qO- https://raw.githubusercontent.com/0deep/clise/v0.2.2/install.sh | bash
+wget -qO- https://raw.githubusercontent.com/0deep/clise/v0.3.0/install.sh | bash
 ```
 
 > [!NOTE]
-> The installer automatically creates a symbolic link `se` pointing to `clise` in `$HOME/.local/bin`. You can use `se` as a shorthand command (e.g., `se settings.yaml`).
+> The installer automatically creates a symbolic link `se` pointing to `clise`. You can use `se` as a shorthand command (e.g., `se settings.yaml`).
 
-### Global Installation (For `sudo` / system-wide usage)
-If you need to run `clise` with root privileges (`sudo clise`) or want to install it system-wide for all users, run the installer with `sudo`. It will automatically detect root privileges and install to `/usr/local/bin`:
 
-```bash
-curl -o- https://raw.githubusercontent.com/0deep/clise/v0.2.2/install.sh | sudo bash
-```
-```bash
-wget -qO- https://raw.githubusercontent.com/0deep/clise/v0.2.2/install.sh | sudo bash
-```
 
 ---
 

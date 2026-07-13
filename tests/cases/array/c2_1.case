@@ -1,0 +1,9 @@
+id: C2.1
+title: Comment first array item then save/verify
+fixture: fixtures/c2_1.yaml
+size: 140x40
+keys: Right Down / s
+expect_contains:
+  # - apple
+  banana
+  cherry

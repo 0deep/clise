@@ -1,6 +1,11 @@
-use crate::edit::find_sub_schema;
+use crate::format::Format;
+use crate::schema_util::{
+    extract_description, extract_type_hint_for_value, find_sub_schema, format_type_placeholder,
+};
 use crate::state::{EditMode, EditorState, NodeType, ValueType};
 use crate::theme::Theme;
+use crate::tooltip;
+use crate::util::char_to_byte_index;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Widget};
 
@@ -25,7 +30,7 @@ impl<'a> StatefulWidget for SchemaEditor<'a> {
     type State = EditorState;
 
     fn render(self, area: Rect, buf: &mut Buffer, state: &mut Self::State) {
-        state.tooltip_area = None;
+        state.tooltip.area = None;
         state.dropdown_area = None;
         let inner_area = match self.block {
             Some(b) => {
@@ -66,7 +71,7 @@ impl<'a> StatefulWidget for SchemaEditor<'a> {
             };
 
         let (tip_area, dropdown_area) = render_list(list_area, buf, state, self.theme, show_cursor);
-        state.tooltip_area = tip_area;
+        state.tooltip.area = tip_area;
         state.dropdown_area = dropdown_area;
 
         // Render scrollbar if content exceeds viewport
@@ -214,6 +219,143 @@ fn render_save_prompt(area: Rect, buf: &mut Buffer, state: &EditorState, theme: 
     }
 }
 
+fn render_text_prompt_value(
+    buf: &mut Buffer,
+    area: Rect,
+    y: u16,
+    first_line_val_x: u16,
+    first_line_width: usize,
+    wrapped_val_x: u16,
+    wrapped_line_width: usize,
+    buffer: &str,
+    cursor_pos: usize,
+    value_style: Style,
+    show_cursor: bool,
+    item_bg: Option<Color>,
+    state: &EditorState,
+    node_path: &[String],
+) {
+    if buffer.is_empty() {
+        let placeholder = state
+            .schema
+            .as_ref()
+            .and_then(|s| find_sub_schema(s, node_path).and_then(format_type_placeholder));
+        if let Some(ref ph) = placeholder {
+            let mut ph_style = Style::default().fg(Color::DarkGray);
+            if let Some(bg) = item_bg {
+                ph_style = ph_style.bg(bg);
+            }
+            buf.set_string(first_line_val_x, y, ph, ph_style);
+            if show_cursor && cursor_pos == 0 {
+                if let Some(cell) = buf.cell_mut((first_line_val_x, y)) {
+                    cell.set_style(ph_style.add_modifier(Modifier::REVERSED));
+                }
+            }
+        } else {
+            render_wrapped_text(
+                buf,
+                area,
+                y,
+                first_line_val_x,
+                first_line_width,
+                wrapped_val_x,
+                wrapped_line_width,
+                buffer,
+                value_style,
+                Some(cursor_pos),
+                show_cursor,
+                state.search_query.as_deref(),
+            );
+        }
+    } else {
+        render_wrapped_text(
+            buf,
+            area,
+            y,
+            first_line_val_x,
+            first_line_width,
+            wrapped_val_x,
+            wrapped_line_width,
+            buffer,
+            value_style,
+            Some(cursor_pos),
+            show_cursor,
+            state.search_query.as_deref(),
+        );
+    }
+}
+
+type DropdownOverlayInfo = Option<(
+    u16,
+    u16,
+    Vec<String>,
+    Vec<Option<String>>,
+    usize,
+    usize,
+    String,
+)>;
+
+fn render_dropdown_value(
+    buf: &mut Buffer,
+    area: Rect,
+    y: u16,
+    first_line_val_x: u16,
+    first_line_width: usize,
+    wrapped_val_x: u16,
+    wrapped_line_width: usize,
+    options: &[String],
+    descriptions: &[Option<String>],
+    selected: usize,
+    scroll_offset: &usize,
+    filter_buffer: &str,
+    filtered_indices: &[usize],
+    value_style: Style,
+    show_cursor: bool,
+    state: &EditorState,
+    value_display: &str,
+) -> DropdownOverlayInfo {
+    let display_text = if filter_buffer.is_empty() {
+        value_display
+    } else {
+        filter_buffer
+    };
+    render_wrapped_text(
+        buf,
+        area,
+        y,
+        first_line_val_x,
+        first_line_width,
+        wrapped_val_x,
+        wrapped_line_width,
+        display_text,
+        value_style,
+        if filter_buffer.is_empty() {
+            None
+        } else {
+            Some(filter_buffer.chars().count())
+        },
+        show_cursor,
+        state.search_query.as_deref(),
+    );
+    let filtered: Vec<String> = filtered_indices
+        .iter()
+        .map(|&i| options[i].clone())
+        .collect();
+    let filtered_descs: Vec<Option<String>> = filtered_indices
+        .iter()
+        .map(|&i| descriptions[i].clone())
+        .collect();
+    Some((
+        first_line_val_x,
+        y,
+        filtered,
+        filtered_descs,
+        selected,
+        *scroll_offset,
+        filter_buffer.to_string(),
+    ))
+}
+
 fn render_list(
     area: Rect,
     buf: &mut Buffer,
@@ -237,8 +379,7 @@ fn render_list(
         if state.show_type_hints {
             let hint = if let Some(schema) = &state.schema {
                 if let Some(sub) = find_sub_schema(schema, &node.path) {
-                    let node_pointer = crate::state::to_json_pointer(&node.path);
-                    let node_value = state.data.pointer(&node_pointer);
+                    let node_value = state.node_at_path_as_value(&node.path);
                     extract_type_hint_for_value(sub, node_value)
                 } else {
                     "".to_string()
@@ -275,18 +416,21 @@ fn render_list(
             }
         }
 
-        if let Some(schema) = &state.schema {
-            if let Some(sub) = find_sub_schema(schema, &node.path) {
-                if let Some(desc) = extract_description(sub) {
-                    let node_x = area.x.saturating_add(x_offset);
-                    let max_tip_width = area
-                        .right()
-                        .saturating_sub(node_x)
-                        .saturating_sub(2)
-                        .clamp(20, 60);
-                    let tip_lines = wrap_text(&desc, max_tip_width as usize).len();
-                    let display_lines = tip_lines.min(8);
-                    selected_lines += (display_lines + 2) as u16;
+        if node.depth > 0 {
+            if let Some(schema) = &state.schema {
+                if let Some(sub) = find_sub_schema(schema, &node.path) {
+                    if let Some(desc) = extract_description(sub) {
+                        let node_x = area.x.saturating_add(x_offset);
+                        let max_tip_width = area
+                            .right()
+                            .saturating_sub(node_x)
+                            .saturating_sub(2)
+                            .clamp(20, 60);
+                        let tip_lines =
+                            crate::tooltip::count_markdown_lines(&desc, max_tip_width as usize);
+                        let display_lines = tip_lines.min(8);
+                        selected_lines += (display_lines + 2) as u16;
+                    }
                 }
             }
         }
@@ -357,15 +501,22 @@ fn render_list(
         let y = area.y + current_y;
         let x_offset = (node.depth as u16).saturating_mul(2);
 
-        let prefix = match node.node_type {
-            NodeType::Object { .. } | NodeType::Array { .. } => {
-                if node.expanded {
-                    "▼ "
-                } else {
-                    "▶ "
-                }
+        let prefix = if node.is_disabled_comment {
+            match state.format {
+                Format::Jsonc => "// ",
+                _ => "# ",
             }
-            NodeType::Leaf => "  ",
+        } else {
+            match node.node_type {
+                NodeType::Object { .. } | NodeType::Array { .. } => {
+                    if node.expanded {
+                        "▼ "
+                    } else {
+                        "▶ "
+                    }
+                }
+                NodeType::Leaf => "  ",
+            }
         };
 
         let is_hovered = state.hovered_node == Some(node_offset);
@@ -374,8 +525,11 @@ fn render_list(
             if is_selected {
                 match &state.edit_mode {
                     EditMode::TextPrompt { buffer, .. } => {
-                        let pointer = crate::state::to_json_pointer(&node.path);
-                        if let Some(orig_val) = state.original_data.pointer(&pointer) {
+                        let orig_val =
+                            crate::node::find_node_by_path(&state.original_nodes, &node.path)
+                                .and_then(|i| state.original_nodes.get(i))
+                                .map(|n| &n.value);
+                        if let Some(orig_val) = orig_val {
                             let curr_val = if let Ok(parsed) =
                                 serde_json::from_str::<serde_json::Value>(buffer)
                             {
@@ -419,6 +573,8 @@ fn render_list(
 
         let mut prefix_style = if is_selected {
             theme.focused_style
+        } else if node.is_disabled_comment {
+            theme.disabled_style
         } else {
             theme.bracket_style
         };
@@ -451,6 +607,8 @@ fn render_list(
 
         let mut key_style = if is_selected {
             theme.focused_style
+        } else if node.is_disabled_comment {
+            theme.disabled_style
         } else {
             theme.key_style
         };
@@ -460,6 +618,8 @@ fn render_list(
 
         let mut value_style = if is_selected {
             theme.focused_style
+        } else if node.is_disabled_comment {
+            theme.disabled_style
         } else {
             match node.value_type {
                 ValueType::String => theme.string_style,
@@ -563,8 +723,7 @@ fn render_list(
         if state.show_type_hints && !is_editing_key {
             if let Some(schema) = &state.schema {
                 if let Some(sub) = find_sub_schema(schema, &node.path) {
-                    let node_pointer = crate::state::to_json_pointer(&node.path);
-                    let node_value = state.data.pointer(&node_pointer);
+                    let node_value = state.node_at_path_as_value(&node.path);
                     type_hint_text = extract_type_hint_for_value(sub, node_value);
                 }
             }
@@ -654,53 +813,22 @@ fn render_list(
         if first_line_val_x < area.right() {
             match &state.edit_mode {
                 EditMode::TextPrompt { buffer, cursor_pos } if is_selected => {
-                    if buffer.is_empty() {
-                        let placeholder = state.schema.as_ref().and_then(|s| {
-                            find_sub_schema(s, &node.path).and_then(format_type_placeholder)
-                        });
-                        if let Some(ref ph) = placeholder {
-                            let mut ph_style = Style::default().fg(Color::DarkGray);
-                            if let Some(bg) = item_bg {
-                                ph_style = ph_style.bg(bg);
-                            }
-                            buf.set_string(first_line_val_x, y, ph, ph_style);
-                            if show_cursor && *cursor_pos == 0 {
-                                if let Some(cell) = buf.cell_mut((first_line_val_x, y)) {
-                                    cell.set_style(ph_style.add_modifier(Modifier::REVERSED));
-                                }
-                            }
-                        } else {
-                            render_wrapped_text(
-                                buf,
-                                area,
-                                y,
-                                first_line_val_x,
-                                first_line_width,
-                                wrapped_val_x,
-                                wrapped_line_width,
-                                buffer,
-                                value_style,
-                                Some(*cursor_pos),
-                                show_cursor,
-                                state.search_query.as_deref(),
-                            );
-                        }
-                    } else {
-                        render_wrapped_text(
-                            buf,
-                            area,
-                            y,
-                            first_line_val_x,
-                            first_line_width,
-                            wrapped_val_x,
-                            wrapped_line_width,
-                            buffer,
-                            value_style,
-                            Some(*cursor_pos),
-                            show_cursor,
-                            state.search_query.as_deref(),
-                        );
-                    }
+                    render_text_prompt_value(
+                        buf,
+                        area,
+                        y,
+                        first_line_val_x,
+                        first_line_width,
+                        wrapped_val_x,
+                        wrapped_line_width,
+                        buffer,
+                        *cursor_pos,
+                        value_style,
+                        show_cursor,
+                        item_bg,
+                        state,
+                        &node.path,
+                    );
                 }
                 EditMode::Dropdown {
                     options,
@@ -710,12 +838,7 @@ fn render_list(
                     filter_buffer,
                     filtered_indices,
                 } if is_selected => {
-                    let display_text = if filter_buffer.is_empty() {
-                        &node.value_display
-                    } else {
-                        filter_buffer
-                    };
-                    render_wrapped_text(
+                    edit_overlay_info = render_dropdown_value(
                         buf,
                         area,
                         y,
@@ -723,33 +846,17 @@ fn render_list(
                         first_line_width,
                         wrapped_val_x,
                         wrapped_line_width,
-                        display_text,
+                        options,
+                        descriptions,
+                        *selected,
+                        scroll_offset,
+                        filter_buffer,
+                        filtered_indices,
                         value_style,
-                        if filter_buffer.is_empty() {
-                            None
-                        } else {
-                            Some(filter_buffer.chars().count())
-                        },
                         show_cursor,
-                        state.search_query.as_deref(),
+                        state,
+                        &node.value_display,
                     );
-                    let filtered: Vec<String> = filtered_indices
-                        .iter()
-                        .map(|&i| options[i].clone())
-                        .collect();
-                    let filtered_descs: Vec<Option<String>> = filtered_indices
-                        .iter()
-                        .map(|&i| descriptions[i].clone())
-                        .collect();
-                    edit_overlay_info = Some((
-                        first_line_val_x,
-                        y,
-                        filtered,
-                        filtered_descs,
-                        selected,
-                        *scroll_offset,
-                        filter_buffer.clone(),
-                    ));
                 }
                 EditMode::NewKeyPrompt { .. } if is_selected => {
                     buf.set_string(first_line_val_x, y, "null", value_style);
@@ -788,7 +895,7 @@ fn render_list(
                         y,
                         filtered,
                         filtered_descs,
-                        selected,
+                        *selected,
                         *scroll_offset,
                         filter_buffer.clone(),
                     ));
@@ -816,7 +923,7 @@ fn render_list(
                         y,
                         filtered,
                         filtered_descs,
-                        selected,
+                        *selected,
                         *scroll_offset,
                         filter_buffer.clone(),
                     ));
@@ -831,7 +938,9 @@ fn render_list(
                         && !matches!(
                             node.node_type,
                             NodeType::Object { .. } | NodeType::Array { .. }
-                        ) {
+                        )
+                        && !node.is_disabled_comment
+                    {
                         state.schema.as_ref().and_then(|s| {
                             find_sub_schema(s, &node.path).and_then(format_type_placeholder)
                         })
@@ -874,42 +983,72 @@ fn render_list(
             }
         }
 
+        // Render comment indicator + preview if node has comments (and not a disabled comment node itself)
+        if node.has_comment && !node.is_disabled_comment {
+            if let Some(ref preview) = node.comment_preview {
+                let indicator = " 💬 ";
+                let preview_text = format!("{}{}", indicator, preview);
+
+                // Calculate position after value
+                let value_width =
+                    unicode_width::UnicodeWidthStr::width(node.value_display.as_str()) as u16;
+                let indicator_x = first_line_val_x
+                    .saturating_add(value_width)
+                    .saturating_add(1);
+
+                if indicator_x < area.right() {
+                    let mut indicator_style = theme.comment_indicator_style;
+                    if is_selected {
+                        indicator_style =
+                            indicator_style.bg(theme.focused_style.bg.unwrap_or(Color::Reset));
+                    }
+                    if let Some(bg) = item_bg {
+                        indicator_style = indicator_style.bg(bg);
+                    }
+
+                    // Truncate preview to fit
+                    let max_preview_width = area.right().saturating_sub(indicator_x) as usize;
+                    let preview_width =
+                        unicode_width::UnicodeWidthStr::width(preview_text.as_str());
+                    let truncated = if preview_width > max_preview_width {
+                        // Find safe cut point by character
+                        let mut width = 0;
+                        let mut cut_idx = 0;
+                        for (idx, ch) in preview_text.char_indices() {
+                            let ch_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+                            if width + ch_width + 3 > max_preview_width {
+                                break;
+                            }
+                            width += ch_width;
+                            cut_idx = idx + ch.len_utf8();
+                        }
+                        format!("{}...", &preview_text[..cut_idx])
+                    } else {
+                        preview_text
+                    };
+
+                    buf.set_string(indicator_x, y, &truncated, indicator_style);
+                }
+            }
+        }
+
         current_y += lines_used;
         node_offset += 1;
     }
 
-    let mut active_tip = None;
-    if let Some(y) = selected_render_y {
-        if let Some(x) = selected_render_x {
-            if let Some(node_h) = selected_render_height {
-                if let Some(node) = state.flattened_nodes.get(state.selected) {
-                    if let Some(schema) = &state.schema {
-                        if let Some(sub) = find_sub_schema(schema, &node.path) {
-                            if let Some(desc) = extract_description(sub) {
-                                let max_tip_width = area
-                                    .right()
-                                    .saturating_sub(x)
-                                    .saturating_sub(2)
-                                    .clamp(20, 60);
-                                let rect = render_tooltip(
-                                    area,
-                                    buf,
-                                    x,
-                                    y + node_h,
-                                    max_tip_width,
-                                    &desc,
-                                    theme,
-                                    selected_render_bg,
-                                    state,
-                                );
-                                active_tip = Some(rect);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
+    let mut active_tip = match (selected_render_y, selected_render_x, selected_render_height) {
+        (Some(y), Some(x), Some(node_h)) => tooltip::render_tooltip_if_available(
+            state,
+            x,
+            y,
+            node_h,
+            area,
+            buf,
+            theme,
+            selected_render_bg,
+        ),
+        _ => None,
+    };
 
     let mut active_dropdown = None;
     if let Some((x, y, options, descs, selected, scroll_offset, filter_buffer)) = edit_overlay_info
@@ -921,7 +1060,7 @@ fn render_list(
             y,
             &options,
             &descs,
-            *selected,
+            selected,
             scroll_offset,
             &filter_buffer,
             theme,
@@ -946,7 +1085,7 @@ fn render_dropdown(
     scroll_offset: usize,
     _filter_buffer: &str,
     theme: &Theme,
-    state: &EditorState,
+    state: &mut EditorState,
 ) -> (usize, Option<Rect>, Option<Rect>) {
     if options.is_empty() {
         return (0, None, None);
@@ -1018,159 +1157,19 @@ fn render_dropdown(
         }
     }
 
-    let mut tip_area = None;
-    // Render description tooltip for the selected item using render_tooltip
-    if let Some(desc) = descriptions.get(selected).and_then(|d| d.as_ref()) {
-        if !desc.is_empty() {
-            // Position tooltip to the right of the dropdown
-            let mut tip_x = popup_area.right() + 1;
-            let mut max_tip_width = area.right().saturating_sub(tip_x);
-            if max_tip_width < 10 {
-                // No space on right — try left of dropdown
-                tip_x = popup_area.x.saturating_sub(10);
-                let max_tip_width_left = popup_area.x.saturating_sub(tip_x);
-                if max_tip_width_left < 10 {
-                    // Still too narrow, use whatever space is available on right
-                    tip_x = popup_area.right() + 1;
-                }
-            }
-            max_tip_width = area.right().saturating_sub(tip_x);
-            if max_tip_width >= 5 && tip_x < area.right() {
-                // Vertical: align with the selected item row
-                let sel_row = selected.saturating_sub(scroll_offset) as u16;
-                let tip_y = popup_y + 1 + sel_row;
-
-                let rect = render_tooltip(
-                    area,
-                    buf,
-                    tip_x,
-                    tip_y,
-                    max_tip_width.clamp(20, 60),
-                    desc,
-                    theme,
-                    None,
-                    state,
-                );
-                tip_area = Some(rect);
-            }
-        }
-    }
+    let tip_area = tooltip::render_dropdown_tip(
+        area,
+        buf,
+        popup_area,
+        popup_y,
+        selected,
+        scroll_offset,
+        descriptions,
+        theme,
+        state,
+    );
 
     (visible_items, tip_area, Some(popup_area))
-}
-
-fn render_tooltip(
-    area: Rect,
-    buf: &mut Buffer,
-    x: u16,
-    y: u16,
-    max_tip_width: u16,
-    desc: &str,
-    theme: &Theme,
-    item_bg: Option<Color>,
-    state: &EditorState,
-) -> Rect {
-    let desc_style = Style::default().fg(Color::Rgb(108, 112, 134)); // Overlay1
-    let mut desc_style = desc_style;
-    if let Some(bg) = item_bg {
-        desc_style = desc_style.bg(bg);
-    }
-
-    // Text wrapping
-    let lines = wrap_text(desc, max_tip_width as usize);
-    if lines.is_empty() {
-        return Rect::default();
-    }
-
-    let total_lines = lines.len();
-    let max_tooltip_height = 8usize;
-    let scroll_limit = total_lines.saturating_sub(max_tooltip_height);
-    let t_scroll = state.tooltip_scroll_offset.min(scroll_limit);
-    let display_lines_count = total_lines.min(max_tooltip_height);
-
-    let tip_height = (display_lines_count + 2) as u16; // +2 for borders
-
-    let text_width = lines
-        .iter()
-        .map(|l| unicode_width::UnicodeWidthStr::width(l.as_str()))
-        .max()
-        .unwrap_or(0) as u16;
-
-    let has_scrollbar = total_lines > max_tooltip_height;
-    let scrollbar_width_offset = if has_scrollbar { 2 } else { 0 };
-    let tip_width = text_width + 2 + scrollbar_width_offset; // +2 for borders
-
-    // Clamp width to area width
-    let tip_width = tip_width.min(area.width);
-
-    // X clamping
-    let mut tip_x = x;
-    if tip_x + tip_width > area.right() {
-        tip_x = area.right().saturating_sub(tip_width);
-    }
-    if tip_x < area.x {
-        tip_x = area.x;
-    }
-
-    // Y clamping
-    let mut tip_y = y;
-    if tip_y + tip_height > area.bottom() {
-        tip_y = area.bottom().saturating_sub(tip_height);
-    }
-    if tip_y < area.y {
-        tip_y = area.y;
-    }
-
-    let tip_area = Rect::new(tip_x, tip_y, tip_width, tip_height);
-    ratatui::widgets::Clear.render(tip_area, buf);
-
-    let mut border_style = theme.bracket_style;
-    if let Some(bg) = item_bg {
-        border_style = border_style.bg(bg);
-    }
-    let mut block = Block::bordered().border_style(border_style);
-    if has_scrollbar {
-        block = block.title(
-            Line::from(" ↕ PgUp/PgDn ")
-                .alignment(Alignment::Right)
-                .style(Style::default().fg(Color::Rgb(76, 79, 105))),
-        );
-    }
-    block.render(tip_area, buf);
-
-    // Text rendering
-    let display_end = (t_scroll + display_lines_count).min(total_lines);
-    let display_lines = &lines[t_scroll..display_end];
-
-    for (i, line) in display_lines.iter().enumerate() {
-        let line_y = tip_y + 1 + i as u16;
-        if line_y < area.bottom() && line_y < buf.area.bottom() {
-            set_string_and_clear(
-                buf,
-                tip_x + 1,
-                line_y,
-                line,
-                (tip_width
-                    .saturating_sub(2)
-                    .saturating_sub(scrollbar_width_offset)) as usize,
-                desc_style,
-            );
-        }
-    }
-
-    // Scrollbar rendering
-    if has_scrollbar {
-        let scrollbar_x = tip_x + tip_width - 1;
-        let thumb_pos = (t_scroll * (display_lines_count - 1)) / scroll_limit;
-        for i in 0..display_lines_count {
-            let sy = tip_y + 1 + i as u16;
-            if sy < area.bottom() && sy < buf.area.bottom() {
-                let ch = if i == thumb_pos { "█" } else { "│" };
-                buf.set_string(scrollbar_x, sy, ch, border_style);
-            }
-        }
-    }
-    tip_area
 }
 
 fn render_wrapped_text(
@@ -1217,26 +1216,16 @@ fn render_wrapped_text(
     }
 
     if text.is_empty() {
-        if let Some(0) = cursor_pos {
-            if show_cursor && current_row_y < area.bottom() {
-                if let Some(cell) = buf.cell_mut((first_line_x, current_row_y)) {
-                    cell.set_char(' ')
-                        .set_style(style.add_modifier(Modifier::REVERSED));
-                }
-                // Clear rest of line 0
-                for x in
-                    (first_line_x + 1)..area.right().min(first_line_x + first_line_width as u16)
-                {
-                    buf[(x, current_row_y)].set_char(' ').set_style(style);
-                }
-            } else {
-                // No cursor, but still clear the line
-                for x in first_line_x..area.right().min(first_line_x + first_line_width as u16) {
-                    buf[(x, current_row_y)].set_char(' ').set_style(style);
-                }
+        let has_cursor = cursor_pos == Some(0) && show_cursor && current_row_y < area.bottom();
+        if has_cursor {
+            if let Some(cell) = buf.cell_mut((first_line_x, current_row_y)) {
+                cell.set_char(' ')
+                    .set_style(style.add_modifier(Modifier::REVERSED));
+            }
+            for x in (first_line_x + 1)..area.right().min(first_line_x + first_line_width as u16) {
+                buf[(x, current_row_y)].set_char(' ').set_style(style);
             }
         } else {
-            // No cursor pos 0, just clear
             for x in first_line_x..area.right().min(first_line_x + first_line_width as u16) {
                 buf[(x, current_row_y)].set_char(' ').set_style(style);
             }
@@ -1295,43 +1284,23 @@ fn render_wrapped_text(
         // If it was the last char
         if chars.peek().is_none() {
             // Handle cursor at the end
-            if let Some(pos) = cursor_pos {
-                if pos == i + 1 && show_cursor {
-                    // Place cursor after last char
-                    if current_line_width < line_max_width {
-                        let cx = line_start_x + current_line_width as u16;
-                        if cx < area.right() {
-                            buf[(cx, current_row_y)]
-                                .set_char(' ')
-                                .set_style(style.add_modifier(Modifier::REVERSED));
-                            current_line_width += 1; // Mark as used for clearing logic below
-                        }
-                    } else {
-                        // Wrap cursor to next line
-                        // Clear current line first
-                        for x in (line_start_x + current_line_width as u16)
-                            ..area.right().min(line_start_x + line_max_width as u16)
-                        {
-                            buf[(x, current_row_y)].set_char(' ').set_style(style);
-                        }
-
-                        row += 1;
-                        let next_y = y + row;
-                        if next_y < area.bottom() {
-                            buf[(wrapped_x, next_y)]
-                                .set_char(' ')
-                                .set_style(style.add_modifier(Modifier::REVERSED));
-                            // Also clear rest of this next line
-                            for x in
-                                (wrapped_x + 1)..area.right().min(wrapped_x + wrapped_width as u16)
-                            {
-                                buf[(x, next_y)].set_char(' ').set_style(style);
-                            }
-                        }
-                        // We already handled clearing for the current line and the next line if cursor wrapped.
-                        return;
-                    }
-                }
+            if handle_end_of_text_cursor(
+                buf,
+                area,
+                y,
+                &mut row,
+                wrapped_x,
+                wrapped_width,
+                line_start_x,
+                line_max_width,
+                current_line_width,
+                current_row_y,
+                cursor_pos,
+                show_cursor,
+                i,
+                style,
+            ) {
+                return;
             }
 
             // Clear remaining space in the current line
@@ -1344,165 +1313,55 @@ fn render_wrapped_text(
     }
 }
 
-pub fn extract_type_hint(sub_schema: &serde_json::Value) -> String {
-    extract_type_hint_for_value(sub_schema, None)
-}
-
-/// Value-aware type hint extraction.
-/// When value is provided and sub_schema has oneOf/anyOf, shows the matching variant's type.
-pub fn extract_type_hint_for_value(
-    sub_schema: &serde_json::Value,
-    value: Option<&serde_json::Value>,
-) -> String {
-    if sub_schema.get("enum").is_some() {
-        return " [Enum]".to_string();
-    }
-
-    if let Some(t) = sub_schema.get("type") {
-        if let Some(s) = t.as_str() {
-            return format_type_name(s);
-        } else if let Some(arr) = t.as_array() {
-            if let Some(first) = arr.iter().find_map(|v| {
-                let s = v.as_str()?;
-                if s != "null" { Some(s) } else { None }
-            }) {
-                return format_type_name(first);
-            }
-        }
-    }
-
-    // Handle anyOf/oneOf/allOf
-    let combo_key = if sub_schema.get("oneOf").is_some() {
-        Some("oneOf")
-    } else if sub_schema.get("anyOf").is_some() {
-        Some("anyOf")
-    } else if sub_schema.get("allOf").is_some() {
-        Some("allOf")
-    } else {
-        None
+/// Handle cursor placement at end of text. Returns true if caller should return early.
+fn handle_end_of_text_cursor(
+    buf: &mut Buffer,
+    area: Rect,
+    y: u16,
+    row: &mut u16,
+    wrapped_x: u16,
+    wrapped_width: usize,
+    line_start_x: u16,
+    line_max_width: usize,
+    current_line_width: usize,
+    current_row_y: u16,
+    cursor_pos: Option<usize>,
+    show_cursor: bool,
+    char_index: usize,
+    style: Style,
+) -> bool {
+    let _ = match cursor_pos {
+        Some(p) if p == char_index + 1 && show_cursor => p,
+        _ => return false,
     };
+    if current_line_width < line_max_width {
+        let cx = line_start_x + current_line_width as u16;
+        if cx < area.right() {
+            buf[(cx, current_row_y)]
+                .set_char(' ')
+                .set_style(style.add_modifier(Modifier::REVERSED));
+        }
+        return true;
+    }
 
-    if let Some(key) = combo_key {
-        if let Some(arr) = sub_schema.get(key).and_then(|v| v.as_array()) {
-            // If value is non-null, try to find the matching variant
-            if let Some(val) = value {
-                if !val.is_null() {
-                    let target_type = match val {
-                        serde_json::Value::String(_) => "string",
-                        serde_json::Value::Object(_) => "object",
-                        serde_json::Value::Array(_) => "array",
-                        serde_json::Value::Number(n) => {
-                            if n.is_i64() || n.is_u64() {
-                                "integer"
-                            } else {
-                                "number"
-                            }
-                        }
-                        serde_json::Value::Bool(_) => "boolean",
-                        serde_json::Value::Null => "null",
-                    };
-                    for variant in arr {
-                        let hint = extract_type_hint_for_value(variant, Some(val));
-                        if !hint.is_empty() {
-                            // Check if this variant matches the target type
-                            if let Some(t) = variant.get("type") {
-                                if t.as_str() == Some(target_type) {
-                                    return hint;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            // Value is null or no match found: show [Union] for multi-variant
-            if arr.len() > 1 {
-                return " [Union]".to_string();
-            }
-            // Single variant: recurse
-            if let Some(variant) = arr.first() {
-                return extract_type_hint_for_value(variant, value);
-            }
+    // Wrap cursor to next line: clear current line first
+    for x in (line_start_x + current_line_width as u16)
+        ..area.right().min(line_start_x + line_max_width as u16)
+    {
+        buf[(x, current_row_y)].set_char(' ').set_style(style);
+    }
+
+    *row += 1;
+    let next_y = y + *row;
+    if next_y < area.bottom() {
+        buf[(wrapped_x, next_y)]
+            .set_char(' ')
+            .set_style(style.add_modifier(Modifier::REVERSED));
+        for x in (wrapped_x + 1)..area.right().min(wrapped_x + wrapped_width as u16) {
+            buf[(x, next_y)].set_char(' ').set_style(style);
         }
     }
-
-    "".to_string()
-}
-
-fn format_type_name(t: &str) -> String {
-    match t {
-        "string" => " [String]",
-        "number" | "integer" => " [Number]",
-        "boolean" => " [Bool]",
-        "object" => " [Object]",
-        "array" => " [Array]",
-        "null" => " [Null]",
-        _ => "",
-    }
-    .to_string()
-}
-
-pub fn extract_description(sub_schema: &serde_json::Value) -> Option<String> {
-    sub_schema
-        .get("description")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-}
-
-fn format_type_placeholder(sub_schema: &serde_json::Value) -> Option<String> {
-    if sub_schema.get("enum").is_some() {
-        return Some("(enum)".to_string());
-    }
-    if let Some(t) = sub_schema.get("type") {
-        if let Some(s) = t.as_str() {
-            return Some(format!("({})", s));
-        } else if let Some(arr) = t.as_array() {
-            if let Some(first) = arr.iter().find_map(|v| {
-                let s = v.as_str()?;
-                if s != "null" { Some(s) } else { None }
-            }) {
-                return Some(format!("({})", first));
-            }
-        }
-    }
-    for key in &["oneOf", "anyOf"] {
-        if let Some(arr) = sub_schema.get(*key).and_then(|v| v.as_array()) {
-            if arr.len() > 1 {
-                return Some("(union)".to_string());
-            } else if let Some(variant) = arr.first() {
-                return format_type_placeholder(variant);
-            }
-        }
-    }
-    None
-}
-
-pub fn wrap_text(desc: &str, max_width: usize) -> Vec<String> {
-    let mut lines: Vec<String> = Vec::new();
-    let mut remaining = desc;
-    while !remaining.is_empty() {
-        let mut break_at = remaining.len();
-        let mut width = 0;
-        let mut last_break = 0;
-        for (i, ch) in remaining.char_indices() {
-            let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-            if width + w > max_width {
-                break;
-            }
-            width += w;
-            if ch == ' ' {
-                last_break = i + ch.len_utf8();
-            }
-            break_at = i + ch.len_utf8();
-        }
-        let end = if last_break > 0 && break_at < remaining.len() {
-            last_break
-        } else {
-            break_at
-        };
-        lines.push(remaining[..end].trim_end().to_string());
-        remaining = &remaining[end..];
-    }
-    lines
+    true
 }
 
 fn render_highlighted_line(
@@ -1514,72 +1373,93 @@ fn render_highlighted_line(
     base_style: Style,
     search_query: Option<&str>,
 ) {
-    if let Some(query) = search_query {
-        if !query.is_empty() {
-            let query_lower = query.to_lowercase();
-            let text_lower = text.to_lowercase();
-
-            let highlight_style = Style::default()
-                .fg(Color::Rgb(17, 17, 27))
-                .bg(Color::Rgb(249, 226, 175));
-
-            let mut current_x = x;
-            let mut remaining_width = width;
-
-            let mut start_search_idx = 0;
-            let mut last_idx = 0;
-
-            while let Some(idx) = text_lower[start_search_idx..].find(&query_lower) {
-                let match_start = start_search_idx + idx;
-                let match_end = match_start + query.len();
-
-                // Text before match
-                let before = &text[last_idx..match_start];
-                let before_width = unicode_width::UnicodeWidthStr::width(before);
-                if remaining_width > 0 {
-                    buf.set_stringn(current_x, y, before, remaining_width, base_style);
-                    current_x += before_width as u16;
-                    remaining_width = remaining_width.saturating_sub(before_width);
-                }
-
-                // Match
-                let matched = &text[match_start..match_end];
-                let matched_width = unicode_width::UnicodeWidthStr::width(matched);
-                if remaining_width > 0 {
-                    buf.set_stringn(current_x, y, matched, remaining_width, highlight_style);
-                    current_x += matched_width as u16;
-                    remaining_width = remaining_width.saturating_sub(matched_width);
-                }
-
-                last_idx = match_end;
-                start_search_idx = match_end;
-                if start_search_idx >= text.len() || remaining_width == 0 {
-                    break;
-                }
-            }
-
-            // Text after last match
-            if last_idx < text.len() && remaining_width > 0 {
-                let after = &text[last_idx..];
-                buf.set_stringn(current_x, y, after, remaining_width, base_style);
-                current_x += unicode_width::UnicodeWidthStr::width(after) as u16;
-            }
-
-            // Clear remaining width
-            if (current_x as usize) < (x as usize + width) {
-                for i in current_x..(x + width as u16) {
-                    if i < buf.area.right() {
-                        buf[(i, y)].set_char(' ').set_style(base_style);
-                    }
-                }
-            }
-            return;
-        }
+    let Some(query) = search_query else {
+        set_string_and_clear(buf, x, y, text, width, base_style);
+        return;
+    };
+    if query.is_empty() {
+        set_string_and_clear(buf, x, y, text, width, base_style);
+        return;
     }
-    set_string_and_clear(buf, x, y, text, width, base_style);
+    render_highlighted_inner(buf, x, y, text, width, base_style, query);
 }
 
-fn set_string_and_clear(buf: &mut Buffer, x: u16, y: u16, text: &str, width: usize, style: Style) {
+fn render_highlighted_inner(
+    buf: &mut Buffer,
+    x: u16,
+    y: u16,
+    text: &str,
+    width: usize,
+    base_style: Style,
+    query: &str,
+) {
+    let query_lower = query.to_lowercase();
+    let text_lower = text.to_lowercase();
+
+    let highlight_style = Style::default()
+        .fg(Color::Rgb(17, 17, 27))
+        .bg(Color::Rgb(249, 226, 175));
+
+    let mut current_x = x;
+    let mut remaining_width = width;
+
+    let mut start_search_idx = 0;
+    let mut last_idx = 0;
+
+    while let Some(idx) = text_lower[start_search_idx..].find(&query_lower) {
+        let match_start = start_search_idx + idx;
+        let match_end = match_start + query.len();
+
+        // Text before match
+        let before = &text[last_idx..match_start];
+        let before_width = unicode_width::UnicodeWidthStr::width(before);
+        if remaining_width > 0 {
+            buf.set_stringn(current_x, y, before, remaining_width, base_style);
+            current_x += before_width as u16;
+            remaining_width = remaining_width.saturating_sub(before_width);
+        }
+
+        // Match
+        let matched = &text[match_start..match_end];
+        let matched_width = unicode_width::UnicodeWidthStr::width(matched);
+        if remaining_width > 0 {
+            buf.set_stringn(current_x, y, matched, remaining_width, highlight_style);
+            current_x += matched_width as u16;
+            remaining_width = remaining_width.saturating_sub(matched_width);
+        }
+
+        last_idx = match_end;
+        start_search_idx = match_end;
+        if start_search_idx >= text.len() || remaining_width == 0 {
+            break;
+        }
+    }
+
+    // Text after last match
+    if last_idx < text.len() && remaining_width > 0 {
+        let after = &text[last_idx..];
+        buf.set_stringn(current_x, y, after, remaining_width, base_style);
+        current_x += unicode_width::UnicodeWidthStr::width(after) as u16;
+    }
+
+    // Clear remaining width
+    if (current_x as usize) < (x as usize + width) {
+        for i in current_x..(x + width as u16) {
+            if i < buf.area.right() {
+                buf[(i, y)].set_char(' ').set_style(base_style);
+            }
+        }
+    }
+}
+
+pub(crate) fn set_string_and_clear(
+    buf: &mut Buffer,
+    x: u16,
+    y: u16,
+    text: &str,
+    width: usize,
+    style: Style,
+) {
     buf.set_stringn(x, y, text, width, style);
     let text_width = unicode_width::UnicodeWidthStr::width(text);
     if text_width < width {
@@ -1628,23 +1508,21 @@ fn render_status_bar(
         }
 
         // Render cursor in search prompt (blinking)
-        let prefix = &buffer[..crate::state::EditorState::char_to_byte_index(buffer, *cursor_pos)];
+        let prefix = &buffer[..char_to_byte_index(buffer, *cursor_pos)];
         let prompt_prefix_len =
             unicode_width::UnicodeWidthStr::width(prompt_prefix.as_str()) as u16;
         let cursor_x =
             area.x + prompt_prefix_len + unicode_width::UnicodeWidthStr::width(prefix) as u16;
-        if cursor_x < area.x + area.width {
-            if show_cursor {
-                let char_count = buffer.chars().count();
-                let char_to_invert = if *cursor_pos < char_count {
-                    buffer.chars().nth(*cursor_pos).unwrap_or(' ')
-                } else {
-                    ' '
-                };
-                buf[(cursor_x, area.y)]
-                    .set_char(char_to_invert)
-                    .set_style(Style::default().add_modifier(Modifier::REVERSED));
-            }
+        if cursor_x < area.x + area.width && show_cursor {
+            let char_count = buffer.chars().count();
+            let char_to_invert = if *cursor_pos < char_count {
+                buffer.chars().nth(*cursor_pos).unwrap_or(' ')
+            } else {
+                ' '
+            };
+            buf[(cursor_x, area.y)]
+                .set_char(char_to_invert)
+                .set_style(Style::default().add_modifier(Modifier::REVERSED));
         }
         return;
     }

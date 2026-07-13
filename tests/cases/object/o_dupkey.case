@@ -1,0 +1,12 @@
+id: O-DUP1
+title: Block duplicate key addition (preserve existing key value, no temp node leftover)
+fixture: fixtures/o1.yaml
+size: 140x40
+keys: Enter type:name Enter s
+expect_contains:
+  name: old
+  count: 1
+  active: true
+  note: hello
+expect_not_contains:
+  new_key

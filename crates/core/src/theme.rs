@@ -12,6 +12,8 @@ pub struct Theme {
     pub status_style: Style,
     pub indent_guide_style: Style,
     pub error_style: Style,
+    pub disabled_style: Style,
+    pub comment_indicator_style: Style,
 }
 
 impl Default for Theme {
@@ -30,6 +32,8 @@ impl Default for Theme {
                 .bg(Color::Rgb(203, 166, 247)), // Mauve
             indent_guide_style: Style::default().fg(Color::Rgb(88, 91, 112)), // Surface1
             error_style: Style::default().fg(Color::Rgb(243, 139, 168)), // Red
+            disabled_style: Style::default().fg(Color::Rgb(88, 91, 112)), // Surface1 (dim gray)
+            comment_indicator_style: Style::default().fg(Color::Rgb(143, 188, 187)), // Catppuccin Teal
         }
     }
 }

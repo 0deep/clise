@@ -6,6 +6,30 @@
 
 set -e
 
+# --- Re-exec as root if not already (triggers password prompt) ---
+if [ "$(id -u)" -ne 0 ]; then
+    # When piped (curl|sh, cat|sh), $0 is not a real file and stdin is
+    # already consumed by the { } block, so we re-download the script.
+    if [ -f "$0" ]; then
+        exec sudo "$0" "$@"
+    else
+        TMP_INSTALL=$(mktemp)
+        INSTALL_URL="https://raw.githubusercontent.com/0deep/clise/main/install.sh"
+        if type curl >/dev/null 2>&1; then
+            curl -fsSL "$INSTALL_URL" -o "$TMP_INSTALL"
+        elif type wget >/dev/null 2>&1; then
+            wget -q -O "$TMP_INSTALL" "$INSTALL_URL"
+        else
+            echo "❌ Error: sudo is required but the script could not be re-downloaded." >&2
+            echo "   Please run: curl -fsSL $INSTALL_URL -o install.sh && sudo sh install.sh" >&2
+            rm -f "$TMP_INSTALL"
+            exit 1
+        fi
+        chmod +x "$TMP_INSTALL"
+        exec sudo sh "$TMP_INSTALL" "$@"
+    fi
+fi
+
 # --- Configuration ---
 OWNER="0deep"  # Replace with actual GitHub owner
 REPO="clise"
@@ -142,7 +166,7 @@ if [ -z "$LATEST_RELEASE" ]; then
 fi
 
 if [ -z "$LATEST_RELEASE" ]; then
-    LATEST_RELEASE="v0.2.2"
+    LATEST_RELEASE="v0.3.0"
     echo "⚠️ Could not fetch latest release automatically. Falling back to $LATEST_RELEASE"
 fi
 

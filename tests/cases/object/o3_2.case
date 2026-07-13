@@ -1,0 +1,10 @@
+id: O3.2
+title: Comment an active key then delete it removes the key entirely
+fixture: fixtures/o4.yaml
+size: 140x40
+keys: Down / d s
+expect_contains:
+  b: 2
+  c: 3
+expect_not_contains:
+  a: 1

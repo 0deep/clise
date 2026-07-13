@@ -1,5 +1,5 @@
 use clise_core::config::CliseConfig;
-use clise_core::format::{Format, detect, serialize};
+use clise_core::format::{Format, detect};
 use clise_core::schema::SchemaFetcher;
 use serde_json::{Map, Value};
 use std::fs;
@@ -127,7 +127,8 @@ pub async fn run(
         }
     };
 
-    let serialized = match serialize(&template_data, format, None, false) {
+    let (nodes, root) = clise_core::format::value_to_annotated(&template_data);
+    let serialized = match clise_core::format::serialize_annotated(&nodes, root, format) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("Error serializing template: {}", e);

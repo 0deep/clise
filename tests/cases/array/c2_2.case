@@ -1,0 +1,11 @@
+id: C2.2
+title: Multiple array items commented (apple+banana)
+fixture: fixtures/c2_2.yaml
+size: 140x40
+keys: Right Down / Down / s
+expect_contains:
+  # - apple
+  # - banana
+  cherry
+  date
+  elderberry

@@ -1,0 +1,10 @@
+id: C5.3
+title: Delete commented (disabled) array item removes it entirely
+fixture: fixtures/c3_precomment.yaml
+size: 140x40
+keys: Down Down d s
+expect_contains:
+  - banana
+  - cherry
+expect_not_contains:
+  apple

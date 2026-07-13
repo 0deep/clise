@@ -1,0 +1,9 @@
+id: C4.3
+title: Move commented (disabled) array item without data loss
+fixture: fixtures/c3_precomment.yaml
+size: 140x40
+keys: Down Down Ctrl+Down s
+expect_contains:
+  # - apple
+  - banana
+  - cherry

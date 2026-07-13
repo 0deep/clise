@@ -1,0 +1,7 @@
+id: L-EX1
+title: Leaf boolean toggle then save
+fixture: fixtures/l1.jsonc
+size: 140x40
+keys: Down Down Down Enter s
+expect_contains:
+  "active": false

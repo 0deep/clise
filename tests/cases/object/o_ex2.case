@@ -1,0 +1,9 @@
+id: O-EX2
+title: Add new key while first object key is commented
+fixture: fixtures/o1.yaml
+size: 140x40
+keys: Down / Left Enter type:note2 Enter s
+expect_contains:
+  # name: old
+  note2:
+  count: 1
