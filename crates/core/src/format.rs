@@ -1579,10 +1579,14 @@ impl<'a> YamlSerializer<'a> {
             }
         } else {
             let val_str = if is_empty_container {
-                if matches!(node.value, Value::Object(_)) {
-                    "{}".to_string()
+                if is_parent_array {
+                    if matches!(node.value, Value::Object(_)) {
+                        "{}".to_string()
+                    } else {
+                        "[]".to_string()
+                    }
                 } else {
-                    "[]".to_string()
+                    "".to_string()
                 }
             } else {
                 serialize_leaf_yaml(&node.value)
@@ -1596,17 +1600,22 @@ impl<'a> YamlSerializer<'a> {
                 }
             } else {
                 let key = node.path.last().map(|s| s.as_str()).unwrap_or("");
+                let val_suffix = if val_str.is_empty() {
+                    "".to_string()
+                } else {
+                    format!(" {}", val_str)
+                };
                 if is_first_field_of_array_item {
                     if is_active {
-                        format!("{}- {}: {}", parent_indent, key, val_str)
+                        format!("{}- {}:{}", parent_indent, key, val_suffix)
                     } else {
-                        format!("{}# - {}: {}", parent_indent, key, val_str)
+                        format!("{}# - {}:{}", parent_indent, key, val_suffix)
                     }
                 } else {
                     if is_active {
-                        format!("{}{}: {}", leading_indent, key, val_str)
+                        format!("{}{}:{}", leading_indent, key, val_suffix)
                     } else {
-                        format!("{}# {}: {}", leading_indent, key, val_str)
+                        format!("{}# {}:{}", leading_indent, key, val_suffix)
                     }
                 }
             };
@@ -2036,5 +2045,17 @@ mod tests {
             "Expected AoT headers, got: {}",
             serialized
         );
+    }
+
+    #[test]
+    fn test_serialize_yaml_empty_containers() {
+        let mut nodes = Vec::new();
+        let root = build_active_nodes(
+            &serde_json::json!({"empty_obj": {}, "empty_arr": []}),
+            &mut nodes,
+            Vec::new(),
+        );
+        let serialized = serialize_annotated(&nodes, root, Format::Yaml).unwrap();
+        assert_eq!(serialized, "empty_obj:\nempty_arr:\n");
     }
 }
