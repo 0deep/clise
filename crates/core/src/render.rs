@@ -96,62 +96,119 @@ impl<'a> StatefulWidget for SchemaEditor<'a> {
             render_save_prompt(area, buf, state, self.theme);
         }
 
-        if matches!(state.edit_mode, EditMode::Help) {
+        if matches!(state.edit_mode, EditMode::Help { .. }) {
             render_help_modal(area, buf, state, self.theme);
         }
     }
 }
 
-fn render_help_modal(area: Rect, buf: &mut Buffer, _state: &EditorState, theme: &Theme) {
-    let shortcuts = [
-        ("?", "Show this help"),
-        ("/", "Search key/value"),
-        ("S", "Save changes"),
-        ("U", "Undo"),
-        ("R", "Redo"),
-        ("T", "Toggle type hints"),
-        ("K", "Toggle child counts"),
-        ("Up/Down", "Navigate through nodes"),
-        ("Ctrl+Up/Down", "Move node up/down"),
-        ("PgUp/PgDn", "Scroll page up/down"),
-        ("Left", "Collapse node"),
-        ("Right", "Expand node / Move to last child"),
-        ("Space", "Toggle expansion"),
-        ("Enter", "Add child (Obj/Arr) or Edit leaf"),
-        ("Backspace", "Edit and clear current value"),
-        ("Delete or D", "Delete selected node"),
-        ("Esc or Q", "Quit (prompts to save if modified)"),
-        ("Ctrl+C", "Force quit without saving"),
+fn render_help_modal(area: Rect, buf: &mut Buffer, state: &mut EditorState, theme: &Theme) {
+    let backdrop_style = Style::default()
+        .bg(Color::Rgb(17, 17, 27))
+        .fg(Color::Rgb(88, 91, 112));
+    buf.set_style(area, backdrop_style);
+
+    #[derive(Clone, Copy)]
+    enum Row {
+        Title(&'static str),
+        Entry(&'static str, &'static str),
+    }
+    let sections: &[(&str, &[(&str, &str)])] = &[
+        (
+            "NAVIGATION",
+            &[
+                ("Up/Down", "Navigate through nodes"),
+                ("Left", "Collapse node"),
+                ("Right", "Expand node / Move to last child"),
+                ("Space", "Toggle expansion"),
+                ("Ctrl+Up/Dn", "Jump to prev/next sibling"),
+                ("Alt+Up/Dn", "Move node up/down (reorder)"),
+                ("PgUp/PgDn", "Scroll page up/down"),
+            ],
+        ),
+        (
+            "EDITING",
+            &[
+                ("Enter", "Add child (Obj/Arr) or Edit leaf"),
+                ("Backspace", "Edit and clear current value"),
+                ("Delete/D", "Delete selected node"),
+                ("S", "Save changes"),
+                ("/", "Search key/value"),
+            ],
+        ),
+        (
+            "VIEW",
+            &[("T", "Toggle type hints"), ("K", "Toggle child counts")],
+        ),
+        (
+            "SESSION",
+            &[
+                ("U", "Undo"),
+                ("R", "Redo"),
+                ("?", "Show / hide this help"),
+                ("Esc or Q", "Quit (prompts to save if modified)"),
+                ("Ctrl+C", "Force quit without saving"),
+            ],
+        ),
     ];
 
-    let width = 60.min(area.width);
-    let height = ((shortcuts.len() + 4) as u16).min(area.height);
+    let mut rows: Vec<Row> = Vec::new();
+    for (title, entries) in sections {
+        rows.push(Row::Title(title));
+        for (k, d) in *entries {
+            rows.push(Row::Entry(k, d));
+        }
+        rows.push(Row::Title("")); // blank spacer line
+    }
+
+    let total_lines = rows.len();
+    let width = 64.min(area.width).max(40);
+    let height = ((total_lines + 4) as u16).min(area.height);
     let x = area.x + (area.width.saturating_sub(width)) / 2;
     let y = area.y + (area.height.saturating_sub(height)) / 2;
     let popup_area = Rect::new(x, y, width, height);
 
     ratatui::widgets::Clear.render(popup_area, buf);
 
-    let block = Block::bordered()
-        .title(" Keyboard Shortcuts ")
-        .border_style(theme.focused_style);
-    block.render(popup_area, buf);
+    let content_x = popup_area.x + 4;
+    let body_top = popup_area.y + 2;
+    let footer_y = popup_area.y + height - 2;
+    let visible = (height as usize).saturating_sub(4).max(1);
 
-    for (i, (key, desc)) in shortcuts.iter().enumerate() {
-        let row_y = y + 2 + i as u16;
-        if row_y >= y + height - 1 {
-            break;
+    let max_offset = total_lines.saturating_sub(visible);
+    if let EditMode::Help { max_offset: m, .. } = &mut state.edit_mode {
+        *m = max_offset;
+    }
+    let offset = match &state.edit_mode {
+        EditMode::Help { scroll_offset, .. } => (*scroll_offset).min(max_offset),
+        _ => 0,
+    };
+
+    for (i, row) in rows.iter().enumerate().skip(offset).take(visible) {
+        let line_y = body_top + (i - offset) as u16;
+        match row {
+            Row::Title(t) => {
+                if !t.is_empty() {
+                    buf.set_string(content_x, line_y, *t, theme.focused_style);
+                }
+            }
+            Row::Entry(k, d) => {
+                buf.set_string(content_x, line_y, *k, theme.key_style);
+                buf.set_string(content_x + 14, line_y, *d, theme.string_style);
+            }
         }
-
-        buf.set_string(x + 2, row_y, key, theme.key_style);
-        buf.set_string(x + 15, row_y, desc, theme.string_style);
     }
 
-    let footer = "Press any key to close";
+    let scroll_info = if max_offset > 0 {
+        format!(" · {}/{}", offset + 1, max_offset + 1)
+    } else {
+        String::new()
+    };
+    let footer = format!("PgUp/PgDn scroll · any key close{}", scroll_info);
     buf.set_string(
-        x + (width - footer.len() as u16) / 2,
-        y + height - 1,
-        footer,
+        x + (width.saturating_sub(footer.len() as u16)) / 2,
+        footer_y,
+        &footer,
         Style::default().fg(Color::DarkGray),
     );
 }
@@ -168,10 +225,12 @@ fn render_save_prompt(area: Rect, buf: &mut Buffer, state: &EditorState, theme: 
     let y = area.y + (area.height.saturating_sub(height)) / 2;
     let popup_area = Rect::new(x, y, width, height);
 
-    ratatui::widgets::Clear.render(popup_area, buf);
+    let backdrop_style = Style::default()
+        .bg(Color::Rgb(17, 17, 27))
+        .fg(Color::Rgb(88, 91, 112));
+    buf.set_style(area, backdrop_style);
 
-    let block = Block::bordered().border_style(theme.focused_style);
-    block.render(popup_area, buf);
+    ratatui::widgets::Clear.render(popup_area, buf);
 
     let msg = "Save changes before exiting?";
     let no_text = "[N]o";
@@ -179,7 +238,7 @@ fn render_save_prompt(area: Rect, buf: &mut Buffer, state: &EditorState, theme: 
 
     buf.set_string(
         x + (width - msg.len() as u16) / 2,
-        y + 3,
+        y + 2,
         msg,
         Style::default().add_modifier(Modifier::BOLD),
     );
@@ -187,7 +246,7 @@ fn render_save_prompt(area: Rect, buf: &mut Buffer, state: &EditorState, theme: 
     // Spaced out buttons: "[N]o    [Y]es"
     let buttons_width = no_text.len() as u16 + 4 + yes_text.len() as u16;
     let buttons_x = x + (width - buttons_width) / 2;
-    let buttons_y = y + 5;
+    let buttons_y = y + 4;
     let no_x = buttons_x;
     let yes_x = buttons_x + no_text.len() as u16 + 4;
 

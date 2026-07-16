@@ -83,8 +83,9 @@ To initialize an empty Object or Array when adding a new node, type `{}` or `[]`
 ---
 
 ### 2.6. Reordering Keys and Array Items
-- Use `Ctrl + Up` or `Ctrl + Down` to reorder the selected property within its parent object, or move an item up/down within its array.
+- Use `Alt + Up` or `Alt + Down` to reorder the selected property within its parent object, or move an item up/down within its array.
 - This changes the physical order in the saved file.
+- Use `Ctrl + Up` or `Ctrl + Down` to jump the cursor to the previous/next sibling (skipping any expanded child subtree).
 
 ![Reordering Demo](./assets/reordering.gif)
 

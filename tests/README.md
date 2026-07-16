@@ -56,7 +56,7 @@ expect_exact:                    # Entire block must be present in saved file (p
   a: 1
   # b: 2
 ```
-Key tokens: `Up Down Left Right Enter Esc Backspace Delete d s q y / Ctrl+Up Ctrl+Down
+Key tokens: `Up Down Left Right Enter Esc Backspace Delete d s q y / Ctrl+Up Ctrl+Down Alt+Up Alt+Down
 PageUp PageDown f t k ?`. Character input uses `type:<text>`.
 
 ## Execution
@@ -121,7 +121,7 @@ Cases and protection code locations that prevent recurrence of fixed bugs.
 - When adding an array node, it does not automatically enter value editing prompt (only key is added, value is null).
   This is the expected behavior, so test assertions check key addition only.
 - Top-level (root) arrays are also serialized as Sequence like nested arrays (verified by `cases/array/c9_toparray.case`).
-- Commented (disabled) nodes CAN now be deleted (`d`) and moved (`Ctrl+Up/Down`); previously these were no-ops.
+- Commented (disabled) nodes CAN now be deleted (`d`) and moved (`Alt+Up/Down`); previously these were no-ops.
   Deleting a disabled array item renumbers siblings and syncs the parent value up the ancestor chain.
 - After delete + re-add of the same key, an inactive tombstone coexists with the new active node.
   Path-based lookups (`find_node_by_path`) prefer the ACTIVE node so value edits are not lost to the tombstone.

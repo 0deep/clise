@@ -12,6 +12,70 @@ pub fn move_down(state: &mut EditorState) {
     }
 }
 
+/// Move cursor to the previous sibling of the selected node (same parent, same
+/// depth). Expanded child subtrees are skipped because children have a longer
+/// path / greater depth and are therefore not siblings.
+pub fn move_to_prev_sibling(state: &mut EditorState) {
+    let current = match state.flattened_nodes.get(state.selected) {
+        Some(n) => n,
+        None => return,
+    };
+    // Root (empty path) or depth-0 top-level node has no sibling navigation.
+    if current.path.len() <= 1 {
+        return;
+    }
+    let parent_prefix = &current.path[..current.path.len() - 1];
+    let path_len = current.path.len();
+    let depth = current.depth;
+
+    let siblings: Vec<usize> = state
+        .flattened_nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| {
+            n.depth == depth && n.path.len() == path_len && n.path[..path_len - 1] == *parent_prefix
+        })
+        .map(|(i, _)| i)
+        .collect();
+
+    if let Some(pos) = siblings.iter().position(|&i| i == state.selected) {
+        if pos > 0 {
+            state.selected = siblings[pos - 1];
+        }
+    }
+}
+
+/// Move cursor to the next sibling of the selected node (same parent, same
+/// depth). See `move_to_prev_sibling` for subtree-skip semantics.
+pub fn move_to_next_sibling(state: &mut EditorState) {
+    let current = match state.flattened_nodes.get(state.selected) {
+        Some(n) => n,
+        None => return,
+    };
+    if current.path.len() <= 1 {
+        return;
+    }
+    let parent_prefix = &current.path[..current.path.len() - 1];
+    let path_len = current.path.len();
+    let depth = current.depth;
+
+    let siblings: Vec<usize> = state
+        .flattened_nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| {
+            n.depth == depth && n.path.len() == path_len && n.path[..path_len - 1] == *parent_prefix
+        })
+        .map(|(i, _)| i)
+        .collect();
+
+    if let Some(pos) = siblings.iter().position(|&i| i == state.selected) {
+        if pos + 1 < siblings.len() {
+            state.selected = siblings[pos + 1];
+        }
+    }
+}
+
 pub fn page_up(state: &mut EditorState) {
     state.selected = state.selected.saturating_sub(state.viewport_height);
 }

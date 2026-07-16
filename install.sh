@@ -6,6 +6,49 @@
 
 set -e
 
+# --- Output formatting helpers (no emoji, ANSI colors) ---
+# Disable colors automatically when output is not a TTY or NO_COLOR is set.
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+    C_CYAN='\033[1;36m'
+    C_BLUE='\033[1;34m'
+    C_GREEN='\033[0;32m'
+    C_YELLOW='\033[0;33m'
+    C_RED='\033[0;31m'
+    C_BOLD='\033[1m'
+    C_RESET='\033[0m'
+else
+    C_CYAN=''; C_BLUE=''; C_GREEN=''; C_YELLOW=''; C_RED=''; C_BOLD=''; C_RESET=''
+fi
+
+clise_box() {
+    # Print a titled box. Usage: clise_box "TITLE"
+    local title="$1"
+    local line="========================================"
+    printf " ${C_CYAN}%s${C_RESET}\n" "$line"
+    printf " ${C_CYAN}${C_BOLD} %s${C_RESET}\n" "$title"
+    printf " ${C_CYAN}%s${C_RESET}\n" "$line"
+}
+clise_step() {
+    # Print a step line. Usage: clise_step "message"
+    printf "${C_BLUE}>>${C_RESET} %s\n" "$1"
+}
+clise_ok() {
+    # Print a success line. Usage: clise_ok "message"
+    printf "   ${C_GREEN}[OK]${C_RESET} %s\n" "$1"
+}
+clise_warn() {
+    # Print a warning line. Usage: clise_warn "message"
+    printf "   ${C_YELLOW}[WARN]${C_RESET} %s\n" "$1"
+}
+clise_err() {
+    # Print an error line to stderr. Usage: clise_err "message"
+    printf "   ${C_RED}[ERROR]${C_RESET} %s\n" "$1" >&2
+}
+clise_info() {
+    # Print an indented info line. Usage: clise_info "message"
+    printf "   %s\n" "$1"
+}
+
 # --- Re-exec as root if not already (triggers password prompt) ---
 if [ "$(id -u)" -ne 0 ]; then
     # When piped (curl|sh, cat|sh), $0 is not a real file and stdin is
@@ -20,8 +63,8 @@ if [ "$(id -u)" -ne 0 ]; then
         elif type wget >/dev/null 2>&1; then
             wget -q -O "$TMP_INSTALL" "$INSTALL_URL"
         else
-            echo "❌ Error: sudo is required but the script could not be re-downloaded." >&2
-            echo "   Please run: curl -fsSL $INSTALL_URL -o install.sh && sudo sh install.sh" >&2
+            clise_err "sudo is required but the script could not be re-downloaded."
+            clise_info "Please run: curl -fsSL $INSTALL_URL -o install.sh && sudo sh install.sh" >&2
             rm -f "$TMP_INSTALL"
             exit 1
         fi
@@ -62,7 +105,7 @@ fi
 COMP_DIR_BASH="$HOME/.local/share/bash-completion/completions"
 COMP_DIR_ZSH="$HOME/.zsh/completion"
 
-echo "=== clise installer ==="
+clise_box "clise installing"
 
 # --- Helper Functions ---
 clise_has() {
@@ -77,7 +120,7 @@ clise_download() {
     elif clise_has "wget"; then
         wget -q -O "$OUT" "$URL"
     else
-        echo "❌ Error: curl or wget is required to download clise." >&2
+        clise_err "curl or wget is required to download clise." >&2
         exit 1
     fi
 }
@@ -133,7 +176,7 @@ case "$OS" in
     linux)   TARGET_OS="linux" ;;
     darwin)  TARGET_OS="macos" ;;
     *)       
-        echo "❌ Unsupported OS: $OS"
+        clise_err "Unsupported OS: $OS"
         exit 1
         ;;
 esac
@@ -142,13 +185,13 @@ case "$ARCH" in
     x86_64|amd64)  TARGET_ARCH="amd64" ;;
     arm64|aarch64) TARGET_ARCH="arm64" ;;
     *)       
-        echo "❌ Unsupported architecture: $ARCH"
+        clise_err "Unsupported architecture: $ARCH"
         exit 1
         ;;
 esac
 
 # 2. Get latest release version (Try redirect link first to avoid rate limiting)
-echo "🔍 Fetching latest version info..."
+clise_step "Fetching latest version info..."
 LATEST_RELEASE=""
 if clise_has "curl"; then
     LATEST_RELEASE=$(curl -sI "https://github.com/$OWNER/$REPO/releases/latest" | grep -i 'location:' | sed -E 's/.*\/tag\/([^[:space:]\r\n]+).*/\1/')
@@ -166,11 +209,11 @@ if [ -z "$LATEST_RELEASE" ]; then
 fi
 
 if [ -z "$LATEST_RELEASE" ]; then
-    LATEST_RELEASE="v0.3.1"
-    echo "⚠️ Could not fetch latest release automatically. Falling back to $LATEST_RELEASE"
+    LATEST_RELEASE="v0.3.2"
+    clise_warn "Could not fetch latest release automatically. Falling back to $LATEST_RELEASE"
 fi
 
-echo "🚀 Latest Version: $LATEST_RELEASE"
+clise_info "Latest Version: $LATEST_RELEASE"
 RELEASE_URL="https://github.com/$OWNER/$REPO/releases/download/$LATEST_RELEASE/${BINARY_NAME}-${TARGET_OS}-${TARGET_ARCH}.tar.gz"
 
 # 3. Download and unpack
@@ -180,14 +223,14 @@ CLEANUP() {
 }
 trap CLEANUP EXIT
 
-echo "📥 Downloading pre-built binary for ${TARGET_ARCH}-${TARGET_OS}..."
+clise_step "Downloading pre-built binary for ${TARGET_ARCH}-${TARGET_OS}..."
 if ! clise_download "$RELEASE_URL" "$TMP_DIR/clise.tar.gz"; then
-    echo "❌ Download failed! Binary may not be built for this release yet."
-    echo "URL: $RELEASE_URL"
+    clise_err "Download failed! Binary may not be built for this release yet."
+    clise_info "URL: $RELEASE_URL"
     exit 1
 fi
 
-echo "📦 Extracting package..."
+clise_step "Extracting package..."
 tar -xzf "$TMP_DIR/clise.tar.gz" -C "$TMP_DIR"
 
 # 4. Install binary
@@ -196,7 +239,7 @@ tar -xzf "$TMP_DIR/clise.tar.gz" -C "$TMP_DIR"
 if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER-}" ]; then
     LOCAL_BIN_DIR="$HOME/.local/bin"
     if [ -f "$LOCAL_BIN_DIR/$BINARY_NAME" ]; then
-        echo "🧹 Found existing local installation at $LOCAL_BIN_DIR/$BINARY_NAME. Removing to prevent PATH shadowing..."
+        clise_info "Found existing local installation at $LOCAL_BIN_DIR/$BINARY_NAME. Removing to prevent PATH shadowing..."
         rm -f "$LOCAL_BIN_DIR/$BINARY_NAME"
     fi
     if [ -h "$LOCAL_BIN_DIR/se" ] || [ -f "$LOCAL_BIN_DIR/se" ]; then
@@ -210,11 +253,11 @@ chmod +x "$INSTALL_DIR/$BINARY_NAME"
 chown "$INSTALL_UID:$INSTALL_GID" "$INSTALL_DIR/$BINARY_NAME" 2>/dev/null || true
 ln -sf "$BINARY_NAME" "$INSTALL_DIR/se"
 chown -h "$INSTALL_UID:$INSTALL_GID" "$INSTALL_DIR/se" 2>/dev/null || true
-echo "✅ Installed binary successfully to $INSTALL_DIR/$BINARY_NAME"
-echo "🔗 Created symbolic link 'se' -> '$BINARY_NAME' in $INSTALL_DIR"
+clise_ok "Installed binary to $INSTALL_DIR/$BINARY_NAME"
+clise_ok "Created symbolic link 'se' -> '$BINARY_NAME' in $INSTALL_DIR"
 
 # 5. Generate and install shell completions automatically
-echo "⚙️ Generating and installing shell completions..."
+clise_step "Generating and installing shell completions..."
 
 CURRENT_SHELL=$(basename "$SHELL")
 
@@ -223,29 +266,43 @@ case "$CURRENT_SHELL" in
         mkdir -p "$COMP_DIR_BASH"
         if "$INSTALL_DIR/$BINARY_NAME" generate-completion bash > "$COMP_DIR_BASH/$BINARY_NAME" 2>/dev/null; then
             chown "$INSTALL_UID:$INSTALL_GID" "$COMP_DIR_BASH/$BINARY_NAME" 2>/dev/null || true
-            echo "✅ Bash completion auto-installed to $COMP_DIR_BASH/$BINARY_NAME"
+            clise_ok "Bash completion installed to $COMP_DIR_BASH/$BINARY_NAME"
         else
-            echo "⚠️ Failed to auto-generate Bash completion."
+            clise_warn "Failed to auto-generate Bash completion."
         fi
         ;;
     zsh)
         mkdir -p "$COMP_DIR_ZSH"
         if "$INSTALL_DIR/$BINARY_NAME" generate-completion zsh > "$COMP_DIR_ZSH/_$BINARY_NAME" 2>/dev/null; then
             chown "$INSTALL_UID:$INSTALL_GID" "$COMP_DIR_ZSH/_$BINARY_NAME" 2>/dev/null || true
-            echo "✅ Zsh completion auto-installed to $COMP_DIR_ZSH/_$BINARY_NAME"
-            
-            # Setup path hint
-            if ! grep -q "fpath=(.*$COMP_DIR_ZSH" ~/.zshrc 2>/dev/null; then
-                echo "💡 Zsh 사용자 안내: ~/.zshrc 파일에 다음 설정을 추가하여 자동완성을 활성화하세요:"
-                echo "   fpath=($COMP_DIR_ZSH \$fpath)"
-                echo "   autoload -U compinit && compinit"
+            clise_ok "Zsh completion installed to $COMP_DIR_ZSH/_$BINARY_NAME"
+
+            # Auto-activate completion in zsh profile (idempotent)
+            ZSH_PROFILE="${ZDOTDIR:-${HOME}}/.zshrc"
+            FPATH_LINE="fpath=($COMP_DIR_ZSH \$fpath)"
+            COMPINIT_LINE="autoload -Uz compinit && compinit"
+            if [ -f "$ZSH_PROFILE" ]; then
+                if ! grep -q "fpath=($COMP_DIR_ZSH" "$ZSH_PROFILE" 2>/dev/null; then
+                    echo "" >> "$ZSH_PROFILE"
+                    echo "# clise zsh completion" >> "$ZSH_PROFILE"
+                    echo "$FPATH_LINE" >> "$ZSH_PROFILE"
+                    echo "$COMPINIT_LINE" >> "$ZSH_PROFILE"
+                    clise_ok "Zsh completion activated in $ZSH_PROFILE (restart shell or run 'autoload -Uz compinit && compinit')"
+                else
+                    clise_ok "Zsh completion already activated in $ZSH_PROFILE"
+                fi
+            else
+                clise_info "To enable completions, add the following to ~/.zshrc:"
+                clise_info "$FPATH_LINE"
+                clise_info "$COMPINIT_LINE"
             fi
         else
-            echo "⚠️ Failed to auto-generate Zsh completion."
+            clise_warn "Failed to auto-generate Zsh completion."
         fi
         ;;
     *)
-        echo "ℹ️ Auto-completions are not supported for shell: $CURRENT_SHELL. You can generate them manually via '$BINARY_NAME generate-completion <SHELL>'."
+        clise_warn "Auto-completions are not supported for shell: $CURRENT_SHELL."
+        clise_info "You can generate them manually via: $BINARY_NAME generate-completion <SHELL>"
         ;;
 esac
 
@@ -259,23 +316,23 @@ if [ "$INSTALL_DIR" != "/usr/local/bin" ] && [ "$INSTALL_DIR" != "/usr/bin" ]; t
         *)
             if [ -n "$USER_PROFILE" ]; then
                 if ! grep -qc "$INSTALL_DIR" "$USER_PROFILE" 2>/dev/null; then
-                    echo "=> Appending PATH configuration to $USER_PROFILE"
+                    clise_step "Appending PATH configuration to $USER_PROFILE"
                     echo "" >> "$USER_PROFILE"
                     echo "# clise path configuration" >> "$USER_PROFILE"
                     echo "$PATH_STR" >> "$USER_PROFILE"
                 else
-                    echo "=> clise PATH configuration already in $USER_PROFILE"
+                    clise_ok "clise PATH configuration already in $USER_PROFILE"
                 fi
             else
-                echo "⚠️  WARNING: $INSTALL_DIR is not in your PATH."
-                echo "   Please add the following line to your shell configuration (~/.bashrc or ~/.zshrc):"
-                echo "   $PATH_STR"
+                clise_warn "$INSTALL_DIR is not in your PATH."
+                clise_info "Please add the following line to your shell configuration (~/.bashrc or ~/.zshrc):"
+                clise_info "$PATH_STR"
             fi
             ;;
     esac
 fi
 
-echo "🎉 Installation completed successfully!"
+clise_box "clise installed"
 
 } # Prevent execution of incomplete script
 

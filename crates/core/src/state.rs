@@ -106,7 +106,10 @@ pub enum EditMode {
     /// Search input prompt
     SearchPrompt { buffer: String, cursor_pos: usize },
     /// Help modal
-    Help,
+    Help {
+        scroll_offset: usize,
+        max_offset: usize,
+    },
     /// Dropdown for selecting a oneOf/anyOf variant when value is null
     OneOfVariantDropdown {
         parent_path: Vec<String>,
@@ -1566,6 +1569,20 @@ impl EditorState {
                 if event.modifiers.contains(KeyModifiers::CONTROL) {
                     match event.code {
                         KeyCode::Up => {
+                            crate::navigate::move_to_prev_sibling(self);
+                            return Action::Noop;
+                        }
+                        KeyCode::Down => {
+                            crate::navigate::move_to_next_sibling(self);
+                            return Action::Noop;
+                        }
+                        _ => {}
+                    }
+                }
+
+                if event.modifiers.contains(KeyModifiers::ALT) {
+                    match event.code {
+                        KeyCode::Up => {
                             self.move_node_up();
                             return Action::Noop;
                         }
@@ -1579,7 +1596,10 @@ impl EditorState {
 
                 match event.code {
                     KeyCode::Char('?') => {
-                        self.edit_mode = EditMode::Help;
+                        self.edit_mode = EditMode::Help {
+                            scroll_offset: 0,
+                            max_offset: 0,
+                        };
                         return Action::Noop;
                     }
                     KeyCode::Up => {
@@ -1668,10 +1688,27 @@ impl EditorState {
                     _ => {}
                 }
             }
-            EditMode::Help => {
-                self.edit_mode = EditMode::Normal;
-                return Action::Noop;
-            }
+            EditMode::Help {
+                scroll_offset,
+                max_offset,
+            } => match event.code {
+                KeyCode::PageUp => {
+                    if *scroll_offset > 0 {
+                        *scroll_offset = scroll_offset.saturating_sub(1);
+                    }
+                    return Action::Noop;
+                }
+                KeyCode::PageDown => {
+                    if *scroll_offset < *max_offset {
+                        *scroll_offset = scroll_offset.saturating_add(1);
+                    }
+                    return Action::Noop;
+                }
+                _ => {
+                    self.edit_mode = EditMode::Normal;
+                    return Action::Noop;
+                }
+            },
             EditMode::SearchPrompt { buffer, cursor_pos } => {
                 let mut run_realtime = false;
                 let mut next_match = false;
@@ -2599,13 +2636,12 @@ mod tests {
             None,
             None,
         );
-        state.edit_mode = EditMode::Normal;
-
-        // '?' should switch to Help mode
+        // '?' should switch to Help mode from Normal
+        assert!(matches!(state.edit_mode, EditMode::Normal));
         state.handle_key_event(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::empty()));
-        assert!(matches!(state.edit_mode, EditMode::Help));
+        assert!(matches!(state.edit_mode, EditMode::Help { .. }));
 
-        // Any key should switch back to Normal mode
+        // Any key (other than PgUp/PgDn) should switch back to Normal mode
         state.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()));
         assert!(matches!(state.edit_mode, EditMode::Normal));
     }

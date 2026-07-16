@@ -69,37 +69,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let mut buf = Vec::new();
                     generate(shell_enum, &mut cmd, "clise", &mut buf);
                     let mut completion = String::from_utf8(buf).unwrap_or_default();
-
-                    let old_clise_block = r#"        clise)
-            opts="-f -m -h -V --format --schema --catalog-match --help --version [FILE] format validate schema init generate-completion"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 1 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi"#;
-
-                    let new_clise_block = r#"        clise)
-            opts="-f -m -h -V --format --schema --catalog-match --help --version format validate schema init"
-            if [[ ${cur} == -* ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            if [[ ${COMP_CWORD} -eq 1 ]] ; then
-                COMPREPLY=()
-                local ext
-                for ext in json jsonc toml yaml yml conf; do
-                    while IFS= read -r line; do
-                        if [[ -n "$line" ]]; then
-                            COMPREPLY+=("$line")
-                        fi
-                    done < <(compgen -f -X "!*.$ext" -- "${cur}")
-                done
-                return 0
-            fi"#;
-
-                    completion = completion.replace(old_clise_block, new_clise_block);
-                    completion = completion.replace("-o default clise", "-o plusdirs clise");
-                    completion = completion.replace("            COMPREPLY=( $(compgen -W \"${opts}\" -- \"${cur}\") )\n            return 0\n            ;;", "            ;;\n");
-
+                    completion =
+                        completion.replace("-o default clise", "-o default plusdirs clise");
                     use std::io::Write;
                     let _ = std::io::stdout().write_all(completion.as_bytes());
                 } else {
