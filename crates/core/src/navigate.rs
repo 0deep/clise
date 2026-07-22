@@ -20,8 +20,8 @@ pub fn move_to_prev_sibling(state: &mut EditorState) {
         Some(n) => n,
         None => return,
     };
-    // Root (empty path) or depth-0 top-level node has no sibling navigation.
-    if current.path.len() <= 1 {
+    // Root (empty path) has no sibling navigation.
+    if current.path.is_empty() {
         return;
     }
     let parent_prefix = &current.path[..current.path.len() - 1];
@@ -52,7 +52,7 @@ pub fn move_to_next_sibling(state: &mut EditorState) {
         Some(n) => n,
         None => return,
     };
-    if current.path.len() <= 1 {
+    if current.path.is_empty() {
         return;
     }
     let parent_prefix = &current.path[..current.path.len() - 1];
@@ -311,5 +311,25 @@ mod tests {
         // The expanded state of "child" should be preserved, so "leaf" is also visible
         assert_eq!(state.flattened_nodes.len(), 4);
         assert!(state.flattened_nodes[2].expanded);
+    }
+
+    #[test]
+    fn test_root_children_sibling_navigation() {
+        let data = json!({
+            "a": 1,
+            "b": 2,
+            "c": 3
+        });
+        let mut state = EditorState::new(data, Format::Json, None, None);
+        state.selected = 1; // "a"
+
+        move_to_next_sibling(&mut state);
+        assert_eq!(state.selected, 2); // "b"
+
+        move_to_next_sibling(&mut state);
+        assert_eq!(state.selected, 3); // "c"
+
+        move_to_prev_sibling(&mut state);
+        assert_eq!(state.selected, 2); // "b"
     }
 }

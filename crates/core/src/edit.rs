@@ -691,7 +691,14 @@ pub fn apply_edit(state: &mut EditorState) {
                         let mut new_path = new_prefix.clone();
                         new_path.extend(suffix);
                         node.path = new_path;
+                        if node.path == new_prefix {
+                            node.value = preserved_value.clone();
+                        }
                     }
+                }
+
+                if let Some(child_node) = state.node_at_path_mut(&new_prefix) {
+                    child_node.value = preserved_value;
                 }
 
                 state.rebuild_flattened();
@@ -880,11 +887,18 @@ pub fn apply_edit(state: &mut EditorState) {
     };
 
     if let Some(v) = state.node_at_path_mut_value(&path) {
-        *v = new_value;
+        *v = new_value.clone();
     }
 
     state.edit_mode = EditMode::Normal;
     state.rebuild_flattened();
+
+    if matches!(new_value, Value::Object(_) | Value::Array(_)) {
+        if let Some(node_mut) = state.flattened_nodes.iter_mut().find(|n| n.path == path) {
+            node_mut.expanded = true;
+        }
+        state.rebuild_flattened();
+    }
 }
 
 pub fn cancel_edit(state: &mut EditorState) {
@@ -994,6 +1008,96 @@ pub fn trigger_add_child(state: &mut EditorState) {
             }
         }
         NodeType::Leaf => {}
+    }
+}
+
+pub fn trigger_add_sibling_after(state: &mut EditorState) {
+    let sel_node = match state.selected_node() {
+        Some(n) => n.clone(),
+        None => return,
+    };
+
+    if sel_node.path.is_empty() {
+        // Root node has no parent/sibling, fall back to adding child
+        trigger_add_child(state);
+        return;
+    }
+
+    let parent_path = sel_node.path[..sel_node.path.len() - 1].to_vec();
+    let child_key = &sel_node.path[sel_node.path.len() - 1];
+
+    let parent_node = match state.node_at_path(&parent_path) {
+        Some(n) => n.clone(),
+        None => return,
+    };
+
+    // Calculate insertion index in parent's children (immediately after current selected child)
+    let child_index = match parent_node.children.iter().position(|&ci| {
+        state
+            .nodes
+            .get(ci)
+            .map(|c| c.path.last() == Some(child_key))
+            .unwrap_or(false)
+    }) {
+        Some(pos) => pos + 1,
+        None => parent_node.children.len(),
+    };
+
+    if parent_node.value.is_array() {
+        let mut val = Value::Null;
+        if let Some(schema) = &state.schema {
+            let mut item_path = parent_path.clone();
+            item_path.push("*".to_string());
+            if let Some(sub) = find_sub_schema(schema, &item_path) {
+                if let Some(def) = sub.get("default") {
+                    val = def.clone();
+                }
+            }
+        }
+        let _ = state.insert_child_node_at(&parent_path, child_index, None, val);
+        start_edit(state);
+    } else if parent_node.value.is_object() {
+        let addable = get_addable_keys_with_descriptions(state, &parent_path);
+
+        let mut temp_key = "new_key".to_string();
+        if let Some(Value::Object(map)) = state.node_at_path_as_value(&parent_path) {
+            let mut count = 0;
+            while map.contains_key(&temp_key) {
+                count += 1;
+                temp_key = format!("new_key_{}", count);
+            }
+        }
+
+        let _ = state.insert_child_node_at(
+            &parent_path,
+            child_index,
+            Some(temp_key.clone()),
+            Value::Null,
+        );
+
+        if !addable.is_empty() {
+            let options: Vec<String> = addable.iter().map(|(k, _)| k.clone()).collect();
+            let descs: Vec<Option<String>> = addable.into_iter().map(|(_, d)| d).collect();
+            let count = options.len();
+            state.edit_mode = EditMode::NewKeyDropdown {
+                parent_path,
+                temp_key,
+                options,
+                descriptions: descs,
+                selected: 0,
+                scroll_offset: 0,
+                filter_buffer: String::new(),
+                cursor_pos: 0,
+                filtered_indices: (0..count).collect(),
+            };
+        } else {
+            state.edit_mode = EditMode::NewKeyPrompt {
+                parent_path,
+                temp_key,
+                buffer: String::new(),
+                cursor_pos: 0,
+            };
+        }
     }
 }
 
@@ -2224,5 +2328,75 @@ mod tests {
             .map(|(s, _)| s.as_str())
             .unwrap_or("");
         assert!(msg.contains("already exists"));
+    }
+
+    #[test]
+    fn test_add_sibling_after_object_node() {
+        let data = json!({
+            "first": "1",
+            "second": "2",
+            "third": "3"
+        });
+        let mut state = EditorState::new(data, Format::Json, None, None);
+        // Find position of "first"
+        let first_pos = state
+            .flattened_nodes
+            .iter()
+            .position(|n| n.path == vec!["first".to_string()])
+            .unwrap();
+        state.selected = first_pos;
+
+        trigger_add_sibling_after(&mut state);
+
+        assert!(matches!(state.edit_mode, EditMode::NewKeyPrompt { .. }));
+
+        // Check node order in parent object node's children
+        let root_idx = state.root;
+        let children = &state.nodes[root_idx].children;
+        // "first" is children[0], new_key should be inserted at index 1 (between first and second)
+        let inserted_node_idx = children[1];
+        let inserted_node = &state.nodes[inserted_node_idx];
+        assert_eq!(inserted_node.path, vec!["new_key".to_string()]);
+    }
+
+    #[test]
+    fn test_add_sibling_after_array_node() {
+        let data = json!([10, 20, 30]);
+        let mut state = EditorState::new(data, Format::Json, None, None);
+        // Select index 1 (element 20)
+        let item1_pos = state
+            .flattened_nodes
+            .iter()
+            .position(|n| n.path == vec!["1".to_string()])
+            .unwrap();
+        state.selected = item1_pos;
+
+        trigger_add_sibling_after(&mut state);
+
+        // EditMode should start editing the newly inserted element
+        let active = state.active_value();
+        let arr = active.as_array().unwrap();
+        assert_eq!(arr.len(), 4);
+        assert_eq!(arr[0], 10);
+        assert_eq!(arr[1], 20);
+        assert_eq!(arr[2], Value::Null);
+        assert_eq!(arr[3], 30);
+    }
+
+    #[test]
+    fn test_add_sibling_on_root_node() {
+        let data = json!({"a": 1});
+        let mut state = EditorState::new(data, Format::Json, None, None);
+        state.selected = 0; // Root object
+
+        trigger_add_sibling_after(&mut state);
+
+        // Falls back to trigger_add_child
+        assert!(matches!(state.edit_mode, EditMode::NewKeyPrompt { .. }));
+        if let EditMode::NewKeyPrompt { parent_path, .. } = &state.edit_mode {
+            assert!(parent_path.is_empty());
+        } else {
+            panic!("Expected NewKeyPrompt with empty parent_path");
+        }
     }
 }

@@ -82,11 +82,11 @@ impl<'a> StatefulWidget for SchemaEditor<'a> {
             let mut scrollbar_state = ScrollbarState::new(max_scroll).position(state.scroll_offset);
             let scrollbar = Scrollbar::default()
                 .orientation(ScrollbarOrientation::VerticalRight)
-                .begin_symbol(Some("┐"))
-                .end_symbol(Some("┘"))
-                .track_symbol(Some("░"))
-                .thumb_symbol("█")
-                .style(Style::default().fg(Color::DarkGray));
+                .begin_symbol(Some(self.theme.scrollbar.begin_symbol))
+                .end_symbol(Some(self.theme.scrollbar.end_symbol))
+                .track_symbol(Some(self.theme.scrollbar.track_symbol))
+                .thumb_symbol(self.theme.scrollbar.thumb_symbol)
+                .style(self.theme.scrollbar.style);
             scrollbar.render(area, buf, &mut scrollbar_state);
         }
 
@@ -130,10 +130,12 @@ fn render_help_modal(area: Rect, buf: &mut Buffer, state: &mut EditorState, them
             "EDITING",
             &[
                 ("Enter", "Add child (Obj/Arr) or Edit leaf"),
+                ("I", "Add sibling node after selected"),
                 ("Backspace", "Edit and clear current value"),
                 ("Delete/D", "Delete selected node"),
                 ("S", "Save changes"),
-                ("/", "Search key/value"),
+                ("F", "Search key/value"),
+                ("/", "Toggle comment"),
             ],
         ),
         (
@@ -635,7 +637,7 @@ fn render_list(
         } else if node.is_disabled_comment {
             theme.disabled_style
         } else {
-            theme.bracket_style
+            theme.bracket_style_for_depth(node.depth)
         };
         if let Some(bg) = item_bg {
             prefix_style = prefix_style.bg(bg);
@@ -669,7 +671,7 @@ fn render_list(
         } else if node.is_disabled_comment {
             theme.disabled_style
         } else {
-            theme.key_style
+            theme.key_style_for_depth(node.depth)
         };
         if let Some(bg) = item_bg {
             key_style = key_style.bg(bg);
@@ -685,7 +687,7 @@ fn render_list(
                 ValueType::Number => theme.number_style,
                 ValueType::Bool => theme.bool_style,
                 ValueType::Null => theme.null_style,
-                ValueType::Object | ValueType::Array => theme.bracket_style,
+                ValueType::Object | ValueType::Array => theme.bracket_style_for_depth(node.depth),
             }
         };
         if let Some(bg) = item_bg {
@@ -1210,8 +1212,13 @@ fn render_dropdown(
         for i in 0..scrollbar_height {
             let sy = popup_y + 1 + i;
             if sy < area.bottom() && sy < buf.area.bottom() {
-                let ch = if i == thumb_position { "█" } else { "│" };
-                buf.set_string(scrollbar_x, sy, ch, theme.bracket_style);
+                let sb = &theme.dropdown_scrollbar;
+                let ch = if i == thumb_position {
+                    sb.thumb_symbol
+                } else {
+                    sb.track_symbol
+                };
+                buf.set_string(scrollbar_x, sy, ch, sb.style);
             }
         }
     }

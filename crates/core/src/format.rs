@@ -1228,7 +1228,12 @@ impl<'a> TomlSerializer<'a> {
                     self.output.push_str(&format!("{}\n", c.text.trim()));
                 }
             }
-            for &child in &node.children {
+            for (i, &child) in node.children.iter().enumerate() {
+                let child_node = &self.nodes[child];
+                let is_section = matches!(child_node.value, Value::Object(_));
+                if i > 0 && is_section {
+                    self.output.push('\n');
+                }
                 self.emit_node(child, is_active)?;
             }
             for c in &node.comments {
@@ -1502,7 +1507,12 @@ impl<'a> YamlSerializer<'a> {
                 }
             }
             let is_root_array = matches!(node.value, Value::Array(_));
-            for &child in &node.children {
+            for (i, &child) in node.children.iter().enumerate() {
+                let child_node = &self.nodes[child];
+                let is_section = matches!(child_node.value, Value::Object(_));
+                if i > 0 && is_section {
+                    self.output.push('\n');
+                }
                 self.emit_node(child, 0, is_root_array, false, is_active)?;
             }
             for c in &node.comments {
@@ -1573,7 +1583,11 @@ impl<'a> YamlSerializer<'a> {
                     indent + 2
                 };
                 let next_is_parent_array = matches!(node.value, Value::Array(_));
-                for &child in &node.children {
+                let is_services_container = node.path.as_slice() == ["services"];
+                for (i, &child) in node.children.iter().enumerate() {
+                    if is_services_container && i > 0 {
+                        self.output.push('\n');
+                    }
                     self.emit_node(child, next_indent, next_is_parent_array, false, is_active)?;
                 }
             }
@@ -1986,7 +2000,8 @@ mod tests {
         let toml = "# header\ntitle = \"My App\"\n# above db\n[database]\n# db host\nhost = \"localhost\"\nport = 5432  # port info\n# tail\n";
         let (nodes, root) = parse_annotated(toml, Format::Toml).unwrap();
         let serialized = serialize_annotated(&nodes, root, Format::Toml).unwrap();
-        assert_eq!(serialized, toml);
+        let expected = "# header\ntitle = \"My App\"\n\n# above db\n[database]\n# db host\nhost = \"localhost\"\nport = 5432  # port info\n# tail\n";
+        assert_eq!(serialized, expected);
     }
 
     #[test]
@@ -2057,5 +2072,25 @@ mod tests {
         );
         let serialized = serialize_annotated(&nodes, root, Format::Yaml).unwrap();
         assert_eq!(serialized, "empty_obj:\nempty_arr:\n");
+    }
+
+    #[test]
+    fn test_serialize_yaml_blank_lines_root_and_services() {
+        let yaml_input = "version: '3.8'\nservices:\n  web:\n    image: nginx\n  db:\n    image: postgres\nnetworks:\n  default:\n    driver: bridge\n";
+        let (nodes, root) = parse_annotated(yaml_input, Format::Yaml).unwrap();
+        let serialized = serialize_annotated(&nodes, root, Format::Yaml).unwrap();
+        let expected = "version: \"3.8\"\n\nservices:\n  web:\n    image: nginx\n\n  db:\n    image: postgres\n\nnetworks:\n  default:\n    driver: bridge\n";
+        assert_eq!(serialized, expected);
+    }
+
+    #[test]
+    fn test_serialize_toml_blank_lines_root() {
+        let toml_input = "title = \"App\"\n\n[database]\nhost = \"localhost\"\n";
+        let (nodes, root) = parse_annotated(toml_input, Format::Toml).unwrap();
+        let serialized = serialize_annotated(&nodes, root, Format::Toml).unwrap();
+        assert_eq!(
+            serialized,
+            "title = \"App\"\n\n[database]\nhost = \"localhost\"\n"
+        );
     }
 }

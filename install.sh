@@ -209,7 +209,7 @@ if [ -z "$LATEST_RELEASE" ]; then
 fi
 
 if [ -z "$LATEST_RELEASE" ]; then
-    LATEST_RELEASE="v0.3.2"
+    LATEST_RELEASE="v0.3.3"
     clise_warn "Could not fetch latest release automatically. Falling back to $LATEST_RELEASE"
 fi
 

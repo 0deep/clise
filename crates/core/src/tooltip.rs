@@ -349,8 +349,13 @@ pub fn render_tooltip(
         for i in 0..display_lines_count {
             let sy = tip_y + 1 + i as u16;
             if sy < area.bottom() && sy < buf.area.bottom() {
-                let ch = if i == thumb_pos { "█" } else { "│" };
-                buf.set_string(scrollbar_x, sy, ch, border_style);
+                let sb = &theme.tooltip_scrollbar;
+                let ch = if i == thumb_pos {
+                    sb.thumb_symbol
+                } else {
+                    sb.track_symbol
+                };
+                buf.set_string(scrollbar_x, sy, ch, sb.style);
             }
         }
     }

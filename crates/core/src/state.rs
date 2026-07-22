@@ -1004,6 +1004,134 @@ impl EditorState {
         Ok(())
     }
 
+    pub fn insert_child_node_at(
+        &mut self,
+        parent_path: &[String],
+        child_index: usize,
+        key: Option<String>,
+        value: Value,
+    ) -> Result<(), String> {
+        self.save_to_undo();
+        let parent_idx = match find_node_by_path(&self.nodes, parent_path) {
+            Some(i) => i,
+            None => return Err("Parent node not found".to_string()),
+        };
+        let (segment, new_value_for_parent): (String, Value) = {
+            let parent = &self.nodes[parent_idx];
+            match &parent.value {
+                Value::Object(map) => {
+                    let k = key
+                        .as_ref()
+                        .ok_or_else(|| "Key required for Object".to_string())?
+                        .clone();
+                    if map.contains_key(&k) {
+                        return Err(format!("Key already exists: {}", k));
+                    }
+                    let mut m = map.clone();
+                    m.insert(k.clone(), value.clone());
+                    (k, Value::Object(m))
+                }
+                Value::Array(arr) => {
+                    let next_idx = parent
+                        .children
+                        .iter()
+                        .filter_map(|&ci| self.nodes.get(ci))
+                        .filter_map(|c| c.path.last())
+                        .filter_map(|s| s.parse::<usize>().ok())
+                        .max()
+                        .map(|m| m + 1)
+                        .unwrap_or(0)
+                        .max(arr.len());
+                    (next_idx.to_string(), {
+                        let mut a = arr.clone();
+                        a.push(value.clone());
+                        Value::Array(a)
+                    })
+                }
+                Value::Null => {
+                    if let Some(k) = key.as_ref() {
+                        let mut m = serde_json::Map::new();
+                        m.insert(k.clone(), value.clone());
+                        (k.clone(), Value::Object(m))
+                    } else {
+                        let a = vec![value.clone()];
+                        ("0".to_string(), Value::Array(a))
+                    }
+                }
+                _ => return Err("Parent is not Object/Array/Null".to_string()),
+            }
+        };
+
+        let final_parent_value = if self.nodes[parent_idx].value.is_null() {
+            if let Some(schema) = &self.schema {
+                if let Some(t) = crate::schema_util::find_sub_schema(schema, parent_path)
+                    .and_then(|s| s.get("type"))
+                    .and_then(|v| v.as_str())
+                {
+                    if t == "array" && key.is_none() {
+                        let a = vec![value.clone()];
+                        Value::Array(a)
+                    } else if t == "object" && key.is_some() {
+                        let mut m = serde_json::Map::new();
+                        m.insert(key.unwrap(), value.clone());
+                        Value::Object(m)
+                    } else {
+                        new_value_for_parent
+                    }
+                } else {
+                    new_value_for_parent
+                }
+            } else {
+                new_value_for_parent
+            }
+        } else {
+            new_value_for_parent
+        };
+
+        self.nodes[parent_idx].value = final_parent_value;
+        let mut child_path = parent_path.to_vec();
+        child_path.push(segment);
+        let new_idx = self.nodes.len();
+        self.nodes.push(AnnotatedNode {
+            value: value.clone(),
+            is_active: true,
+            comments: Vec::new(),
+            children: Vec::new(),
+            path: child_path.clone(),
+        });
+
+        let target_pos = child_index.min(self.nodes[parent_idx].children.len());
+        self.nodes[parent_idx].children.insert(target_pos, new_idx);
+
+        if self.nodes[parent_idx].value.is_object() {
+            self.sync_value_from_active_children(parent_idx);
+            self.key_order_changed = true;
+        } else if self.nodes[parent_idx].value.is_array() {
+            self.sync_value_from_active_children(parent_idx);
+            crate::format::renumber_array_children(&mut self.nodes, parent_idx);
+            if let Some(new_last) = self.nodes[new_idx].path.last().cloned() {
+                child_path[parent_path.len()] = new_last;
+            }
+        }
+
+        if let Some(pn) = self
+            .flattened_nodes
+            .iter_mut()
+            .find(|n| n.path == parent_path)
+        {
+            pn.expanded = true;
+        }
+        self.rebuild_flattened();
+        if let Some(pos) = self
+            .flattened_nodes
+            .iter()
+            .position(|n| n.path == child_path)
+        {
+            self.selected = pos;
+        }
+        Ok(())
+    }
+
     pub fn move_node_up(&mut self) {
         let node = match self.selected_node() {
             Some(n) => n.clone(),
@@ -1547,6 +1675,10 @@ impl EditorState {
                                 self.rebuild_flattened();
                                 return Action::Noop;
                             }
+                            'i' => {
+                                crate::edit::trigger_add_sibling_after(self);
+                                return Action::Noop;
+                            }
                             'f' => {
                                 self.edit_mode = EditMode::SearchPrompt {
                                     buffer: String::new(),
@@ -1847,57 +1979,13 @@ impl EditorState {
                                     }
                                     let new_cursor_pos = new_buffer.chars().count();
 
-                                    // Check if schema has options for this parent object
-                                    let addable = crate::edit::get_addable_keys_with_descriptions(
-                                        self,
-                                        &parent_path,
-                                    );
-                                    if !addable.is_empty() {
-                                        let mut options: Vec<String> =
-                                            addable.iter().map(|(k, _)| k.clone()).collect();
-                                        let mut descs: Vec<Option<String>> =
-                                            addable.into_iter().map(|(_, d)| d).collect();
-                                        if !options.contains(&original_key) {
-                                            let idx =
-                                                options.partition_point(|k| k < &original_key);
-                                            options.insert(idx, original_key.clone());
-                                            descs.insert(idx, None);
-                                        }
-
-                                        let filtered_indices: Vec<usize> = options
-                                            .iter()
-                                            .enumerate()
-                                            .filter(|(_, opt)| {
-                                                if new_buffer.is_empty() {
-                                                    true
-                                                } else {
-                                                    opt.to_lowercase()
-                                                        .contains(&new_buffer.to_lowercase())
-                                                }
-                                            })
-                                            .map(|(i, _)| i)
-                                            .collect();
-
-                                        self.edit_mode = EditMode::NewKeyDropdown {
-                                            parent_path,
-                                            temp_key: original_key.clone(),
-                                            options,
-                                            descriptions: descs,
-                                            selected: 0,
-                                            scroll_offset: 0,
-                                            filter_buffer: new_buffer,
-                                            cursor_pos: new_cursor_pos,
-                                            filtered_indices,
-                                        };
-                                    } else {
-                                        self.edit_mode = EditMode::RenameKeyPrompt {
-                                            parent_path,
-                                            original_key,
-                                            buffer: new_buffer,
-                                            cursor_pos: new_cursor_pos,
-                                            value: current_value,
-                                        };
-                                    }
+                                    self.edit_mode = EditMode::RenameKeyPrompt {
+                                        parent_path,
+                                        original_key,
+                                        buffer: new_buffer,
+                                        cursor_pos: new_cursor_pos,
+                                        value: current_value,
+                                    };
                                 }
                             }
                         }
@@ -3076,6 +3164,56 @@ mod tests {
     }
 
     #[test]
+    fn test_backspace_preserve_value_on_key_rename_and_cancel() {
+        use crate::edit::{apply_edit, cancel_edit};
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        // 1. Value with complex structure/scalar to verify preservation
+        let data = serde_json::json!({"port": 8080});
+        let mut state = EditorState::new(data, crate::format::Format::Json, None, None);
+
+        // Select the "port" node and enter TextPrompt
+        state.selected = 1;
+        state.edit_mode = EditMode::TextPrompt {
+            buffer: "".to_string(),
+            cursor_pos: 0,
+        };
+
+        // Backspace to transition to RenameKeyPrompt
+        state.handle_key_event(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        assert!(matches!(state.edit_mode, EditMode::RenameKeyPrompt { .. }));
+
+        // Cancel edit with Esc/cancel_edit
+        cancel_edit(&mut state);
+        assert_eq!(state.edit_mode, EditMode::Normal);
+        assert_eq!(state.active_value(), serde_json::json!({"port": 8080}));
+
+        // Re-enter edit mode and transition to RenameKeyPrompt again
+        state.last_backspace_time = None;
+        state.edit_mode = EditMode::TextPrompt {
+            buffer: "".to_string(),
+            cursor_pos: 0,
+        };
+        state.handle_key_event(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+
+        // Rename key to "server_port" and apply
+        if let EditMode::RenameKeyPrompt {
+            buffer, cursor_pos, ..
+        } = &mut state.edit_mode
+        {
+            *buffer = "server_port".to_string();
+            *cursor_pos = 11;
+        }
+        apply_edit(&mut state);
+
+        // Verify key was renamed while value 8080 remained completely preserved
+        assert_eq!(
+            state.active_value(),
+            serde_json::json!({"server_port": 8080})
+        );
+    }
+
+    #[test]
     fn test_backspace_to_rename_key_for_object() {
         use crate::edit::apply_edit;
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -3841,5 +3979,47 @@ app:
             banana_back < banana_still,
             "banana should have moved back up"
         );
+    }
+
+    #[test]
+    fn test_backspace_key_rename_preserves_original_value() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let data = json!({"test": 123});
+        let mut state = EditorState::new(data, Format::Yaml, None, None);
+
+        state.selected = 1; // "test" node
+        crate::edit::start_edit(&mut state);
+
+        if let EditMode::TextPrompt {
+            ref mut buffer,
+            ref mut cursor_pos,
+        } = state.edit_mode
+        {
+            buffer.clear();
+            *cursor_pos = 0;
+        } else {
+            panic!("Expected TextPrompt mode");
+        }
+
+        // Backspace to trigger key rename transition
+        let event = KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE);
+        state.handle_key_event(event);
+
+        assert!(matches!(state.edit_mode, EditMode::RenameKeyPrompt { .. }));
+
+        if let EditMode::RenameKeyPrompt {
+            ref mut buffer,
+            ref mut cursor_pos,
+            ..
+        } = state.edit_mode
+        {
+            *buffer = "renamed_test".to_string();
+            *cursor_pos = buffer.chars().count();
+        }
+
+        crate::edit::apply_edit(&mut state);
+
+        assert_eq!(state.active_value()["renamed_test"], 123);
     }
 }

@@ -116,8 +116,9 @@ async fn run_tui(
     });
 
     let (json_data, filename, format, original_content) = if let Some(path) = file_path {
-        let content = match std::fs::read_to_string(&path) {
-            Ok(c) => c,
+        let (content, is_new_file) = match std::fs::read_to_string(&path) {
+            Ok(c) => (Some(c), false),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (None, true),
             Err(e) => {
                 eprintln!("Error reading file '{}': {}", path, e);
                 std::process::exit(1);
@@ -126,16 +127,21 @@ async fn run_tui(
         let format = if let Some(fmt) = explicit_format {
             fmt
         } else {
-            clise_core::format::detect(&path, &content)
+            clise_core::format::detect(&path, content.as_deref().unwrap_or(""))
         };
-        let data = match clise_core::format::parse(&content, format) {
-            Ok(d) => d,
-            Err(e) => {
-                eprintln!("Invalid file format in '{}': {}", path, e);
-                std::process::exit(1);
+        let data = if is_new_file {
+            serde_json::json!({})
+        } else {
+            let content_str = content.as_ref().unwrap();
+            match clise_core::format::parse(content_str, format) {
+                Ok(d) => d,
+                Err(e) => {
+                    eprintln!("Invalid file format in '{}': {}", path, e);
+                    std::process::exit(1);
+                }
             }
         };
-        (data, Some(path), format, Some(content))
+        (data, Some(path), format, content)
     } else if !std::io::stdin().is_terminal() {
         // Read from stdin
         let mut content = String::new();

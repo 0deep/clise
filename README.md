@@ -35,10 +35,10 @@ Using its core library, `clisé` provides a unified interface to edit structured
 Install `clisé` using the installation script via `curl` or `wget`:
 
 ```bash
-curl -o- https://raw.githubusercontent.com/0deep/clise/v0.3.2/install.sh | bash
+curl -o- https://raw.githubusercontent.com/0deep/clise/v0.3.3/install.sh | bash
 ```
 ```bash
-wget -qO- https://raw.githubusercontent.com/0deep/clise/v0.3.2/install.sh | bash
+wget -qO- https://raw.githubusercontent.com/0deep/clise/v0.3.3/install.sh | bash
 ```
 
 > [!NOTE]
