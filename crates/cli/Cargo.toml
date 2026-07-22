@@ -10,11 +10,11 @@ readme = "README.md"
 clise_core = { package = "clise", path = "../core", features = ["schema"], version = "0.3.3" }
 ratatui.workspace = true
 serde_json.workspace = true
-tokio = { version = "=1.52.3", features = ["full"] }
+tokio = { version = "=1.53.1", features = ["full"] }
 crossterm = { version = "=0.29.0", features = ["event-stream"] }
-futures = "=0.3.32"
-clap = { version = "=4.6.1", features = ["derive"] }
-jsonschema = "=0.46.5"
+futures = "=0.3.33"
+clap = { version = "=4.6.4", features = ["derive"] }
+jsonschema = "=0.48.2"
 directories = "=6.0.0"
-clap_complete = "=4.6.5"
+clap_complete = "=4.6.7"
 
