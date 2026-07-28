@@ -1240,11 +1240,40 @@ impl EditorState {
         }
         self.save_to_undo();
         if let Some(idx) = find_node_by_path(&self.nodes, &node.path) {
-            let n = &mut self.nodes[idx];
-            n.is_active = !n.is_active;
+            let target_active = !self.nodes[idx].is_active;
+            self.nodes[idx].is_active = target_active;
+
+            // Recursively update all child nodes' is_active state
+            fn set_active_rec(nodes: &mut [AnnotatedNode], parent_idx: usize, active: bool) {
+                let children = nodes[parent_idx].children.clone();
+                for child_idx in children {
+                    if let Some(child) = nodes.get_mut(child_idx) {
+                        child.is_active = active;
+                    }
+                    set_active_rec(nodes, child_idx, active);
+                }
+            }
+            set_active_rec(&mut self.nodes, idx, target_active);
         } else {
             return Err("Node not found in nodes vec".to_string());
         }
+
+        // Auto-expand toggled node in cache so children are visible immediately in TUI
+        if let Some(cached) = self
+            .all_nodes_cache
+            .iter_mut()
+            .find(|n| n.path == node.path)
+        {
+            cached.expanded = true;
+        }
+        if let Some(ui_node) = self
+            .flattened_nodes
+            .iter_mut()
+            .find(|n| n.path == node.path)
+        {
+            ui_node.expanded = true;
+        }
+
         self.rebuild_flattened();
         if let Some(pos) = self
             .flattened_nodes
@@ -4021,5 +4050,64 @@ app:
         crate::edit::apply_edit(&mut state);
 
         assert_eq!(state.active_value()["renamed_test"], 123);
+    }
+
+    #[test]
+    fn test_toggle_comment_parent_uncomments_all_children_and_expands() {
+        let yaml = "version: \"3.8\"\n# server:\n#   host: 127.0.0.1\n#   port: 8080\n";
+        let (nodes, root) = crate::format::parse_annotated(yaml, Format::Yaml).unwrap();
+        let mut state = EditorState::new(
+            serde_json::json!({}),
+            Format::Yaml,
+            None,
+            Some(yaml.to_string()),
+        );
+        state.nodes = nodes;
+        state.root = root;
+        state.rebuild_flattened();
+
+        // Find "server" node index in flattened_nodes
+        let server_pos = state
+            .flattened_nodes
+            .iter()
+            .position(|n| n.key == "server")
+            .expect("server node should be flattened");
+
+        state.selected = server_pos;
+        assert!(state.flattened_nodes[server_pos].is_disabled_comment);
+
+        // Toggle comment on "server"
+        state.toggle_comment().unwrap();
+
+        // 1. "server" node must be enabled and expanded
+        let server_pos_after = state
+            .flattened_nodes
+            .iter()
+            .position(|n| n.key == "server")
+            .unwrap();
+        assert!(!state.flattened_nodes[server_pos_after].is_disabled_comment);
+        assert!(state.flattened_nodes[server_pos_after].expanded);
+
+        // 2. Children "host" and "port" must be visible in flattened_nodes and NOT disabled
+        let host_node = state
+            .flattened_nodes
+            .iter()
+            .find(|n| n.key == "host")
+            .expect("host node should be visible after toggle_comment on parent");
+        assert!(!host_node.is_disabled_comment);
+
+        let port_node = state
+            .flattened_nodes
+            .iter()
+            .find(|n| n.key == "port")
+            .expect("port node should be visible after toggle_comment on parent");
+        assert!(!port_node.is_disabled_comment);
+
+        // 3. Serialized output must contain clean uncommented code
+        let output =
+            crate::format::serialize_annotated(&state.nodes, state.root, state.format).unwrap();
+        assert!(output.contains("server:"));
+        assert!(output.contains("  host: 127.0.0.1"));
+        assert!(output.contains("  port: 8080"));
     }
 }

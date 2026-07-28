@@ -23,6 +23,7 @@ pub fn rebuild_flattened(
         show_child_counts,
         schema,
         format,
+        false,
     );
     out
 }
@@ -37,6 +38,7 @@ fn flatten_node(
     show_child_counts: bool,
     schema: Option<&Value>,
     format: Format,
+    parent_disabled: bool,
 ) {
     let Some(node) = nodes.get(idx) else { return };
     let value = &node.value;
@@ -88,7 +90,7 @@ fn flatten_node(
                 stripped
             }
         });
-    let is_disabled = !node.is_active;
+    let is_disabled = !node.is_active || parent_disabled;
     let ui = UiNode {
         path: node.path.clone(),
         depth,
@@ -123,6 +125,7 @@ fn flatten_node(
                 show_child_counts,
                 schema,
                 format,
+                is_disabled,
             );
         }
     }
@@ -489,5 +492,37 @@ mod tests {
         assert_eq!(out[2].key, "b");
         assert!(out[2].is_disabled_comment);
         assert_eq!(out[3].key, "c");
+    }
+
+    #[test]
+    fn test_flatten_parent_disabled_inherits_to_children() {
+        // root -> parent (is_active: false) -> child (is_active: true)
+        let nodes = vec![
+            make_node(json!({"parent": {"child": 123}}), true, vec![], vec![1]),
+            make_node(json!({"child": 123}), false, vec!["parent"], vec![2]),
+            make_node(json!(123), true, vec!["parent", "child"], vec![]),
+        ];
+
+        let prev_nodes = vec![UiNode {
+            path: vec!["parent".to_string()],
+            depth: 1,
+            key: "parent".to_string(),
+            value_display: "".to_string(),
+            value_type: ValueType::Object,
+            node_type: NodeType::Object { child_count: 1 },
+            expanded: true,
+            is_disabled_comment: true,
+            has_comment: false,
+            comment_preview: None,
+        }];
+
+        let out = rebuild_flattened(&nodes, 0, &prev_nodes, true, None, Format::Yaml);
+
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[1].key, "parent");
+        assert!(out[1].is_disabled_comment);
+        assert_eq!(out[2].key, "child");
+        // Child's own is_active is true, but since parent is disabled, child must be marked as is_disabled_comment: true
+        assert!(out[2].is_disabled_comment);
     }
 }

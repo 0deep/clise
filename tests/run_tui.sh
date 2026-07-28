@@ -15,6 +15,7 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib.sh"
 
 BACKEND="tu"
@@ -34,6 +35,7 @@ if [[ -z "$CASE_ARG" ]]; then
   exit 1
 fi
 
+# shellcheck disable=SC1090
 source "$SCRIPT_DIR/backends/$BACKEND.sh" || {
   echo "backend '$BACKEND' load failed" >&2; exit 1
 }
