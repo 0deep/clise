@@ -323,22 +323,31 @@ fn scan_yaml_like_comments(
             }
 
             let stripped_probe = strip_comment_marker(line, format);
-            // Continuation of disabled multiline block → absorb (choice A)
-            if in_disabled_block && is_disabled_continuation(&stripped_probe) {
+            // Continuation of disabled multiline block → absorb only if NOT valid disabled code line
+            if in_disabled_block
+                && is_disabled_continuation(&stripped_probe)
+                && !is_disabled_code(line, format, None)
+            {
                 i += 1;
                 continue;
             }
 
-            // Resolve parent path by indent
-            let mut temp_stack = path_stack.clone();
-            while let Some(&(stack_indent, _)) = temp_stack.last() {
-                if stack_indent >= indent {
-                    temp_stack.pop();
+            let effective_indent = leading_indent(line) + leading_indent(&stripped_probe);
+
+            // Resolve parent path by effective indent
+            while let Some(&(stack_indent, _)) = path_stack.last() {
+                let should_pop = if format == Format::Toml {
+                    stack_indent > effective_indent
+                } else {
+                    stack_indent >= effective_indent
+                };
+                if should_pop {
+                    path_stack.pop();
                 } else {
                     break;
                 }
             }
-            let parent_path: Vec<String> = temp_stack.iter().map(|(_, k)| k.clone()).collect();
+            let parent_path: Vec<String> = path_stack.iter().map(|(_, k)| k.clone()).collect();
             let parent_idx = if parent_path.is_empty() {
                 root_idx
             } else {
@@ -351,7 +360,14 @@ fn scan_yaml_like_comments(
                 let t = stripped.trim_start();
                 let is_array_item = t.starts_with("- ") || t == "-";
 
-                let mut node_path = parent_path.clone();
+                if is_array_item
+                    && parent_idx != root_idx
+                    && !nodes[parent_idx].is_active
+                    && !nodes[parent_idx].value.is_array()
+                {
+                    nodes[parent_idx].value = Value::Array(Vec::new());
+                }
+
                 let segment = if is_array_item {
                     // Temporary segment; renumber later
                     format!("__d{}", i)
@@ -360,7 +376,8 @@ fn scan_yaml_like_comments(
                 } else {
                     format!("disabled_{}", i)
                 };
-                node_path.push(segment);
+                let mut node_path = parent_path.clone();
+                node_path.push(segment.clone());
 
                 let value = parse_disabled_value(&stripped, format);
                 let comments = drain_pending_as_above(&mut pending_above);
@@ -383,6 +400,9 @@ fn scan_yaml_like_comments(
                         && t.rsplit_once(':')
                             .map(|(_, v)| v.trim().is_empty())
                             .unwrap_or(false));
+                if opens_block {
+                    path_stack.push((effective_indent, segment));
+                }
                 in_disabled_block = opens_block;
             } else {
                 pending_above.push((i, line.to_string()));
@@ -758,11 +778,19 @@ fn push_disabled_lines(
         }
         let stripped = strip_comment_marker(text, format);
         // Nested body of previous `# key:` block (e.g. `#   build: x`)
-        if in_block && is_disabled_continuation(&stripped) {
+        if in_block && is_disabled_continuation(&stripped) && !is_disabled_code(text, format, None)
+        {
             continue;
         }
         let t = stripped.trim_start();
         let is_array_item = t.starts_with("- ") || t == "-";
+        if is_array_item
+            && parent_idx != 0
+            && !nodes[parent_idx].is_active
+            && !nodes[parent_idx].value.is_array()
+        {
+            nodes[parent_idx].value = Value::Array(Vec::new());
+        }
         let segment = if is_array_item {
             format!("__d{}", line)
         } else {
@@ -871,7 +899,7 @@ fn scan_jsonc_comments(text: &str, nodes: &mut Vec<AnnotatedNode>, root_idx: usi
                     format!("__d{}", i)
                 };
                 let mut node_path = parent_path.clone();
-                node_path.push(segment);
+                node_path.push(segment.clone());
                 let value = parse_disabled_value(&stripped, format);
                 let comments = drain_pending_as_above(&mut pending_above);
                 let new_idx = nodes.len();
@@ -884,6 +912,11 @@ fn scan_jsonc_comments(text: &str, nodes: &mut Vec<AnnotatedNode>, root_idx: usi
                 });
                 nodes[parent_idx].children.push(new_idx);
                 source_lines.insert(new_idx, i);
+
+                let opens_block = t.ends_with('{') || t.ends_with('[');
+                if opens_block {
+                    path_stack.push(segment);
+                }
             } else {
                 pending_above.push((i, line.to_string()));
             }
@@ -2092,5 +2125,23 @@ mod tests {
             serialized,
             "title = \"App\"\n\n[database]\nhost = \"localhost\"\n"
         );
+    }
+
+    #[test]
+    fn test_parse_nested_disabled_nodes_preserves_depth() {
+        let yaml_input = "name: app\n# server:\n#   host: localhost\n";
+        let (nodes, _root) = parse_annotated(yaml_input, Format::Yaml).unwrap();
+
+        let host_idx =
+            crate::node::find_node_by_path(&nodes, &["server".to_string(), "host".to_string()]);
+        assert!(
+            host_idx.is_some(),
+            "Expected 'host' node path to be ['server', 'host'], but was not found. Nodes: {:?}",
+            nodes.iter().map(|n| &n.path).collect::<Vec<_>>()
+        );
+
+        let host_node = &nodes[host_idx.unwrap()];
+        assert_eq!(host_node.path, vec!["server", "host"]);
+        assert!(!host_node.is_active);
     }
 }

@@ -61,7 +61,14 @@ do_fmt() {
   echo ">>> Fmt check complete"
 }
 
+do_shellcheck() {
+  echo ">>> Running ShellCheck..."
+  run bash -c 'apt-get update -qq && apt-get install -y -qq shellcheck >/dev/null 2>&1; shellcheck *.sh'
+  echo ">>> ShellCheck complete"
+}
+
 do_all() {
+  do_shellcheck
   do_fmt
   do_build
   do_clippy
@@ -81,14 +88,15 @@ usage() {
 Usage: $0 <command> [--release]
 
 Commands:
-  build   Build project
-  test    Run tests
-  audit   Security audit (cargo-audit)
-  lint    Lint (cargo-deny)
-  clippy  Lint (cargo-clippy)
-  fmt     Check formatting (cargo fmt --check)
-  all     Full validation (fmt + build + clippy + test + audit)
-  shell   Enter container shell
+  build       Build project
+  test        Run tests
+  audit       Security audit (cargo-audit)
+  lint        Lint (cargo-deny)
+  clippy      Lint (cargo-clippy)
+  fmt         Check formatting (cargo fmt --check)
+  shellcheck  Lint shell scripts (shellcheck)
+  all         Full validation (shellcheck + fmt + build + clippy + test + audit)
+  shell       Enter container shell
 
 Options:
   --release   Build/test in release mode
@@ -111,13 +119,14 @@ while [[ $# -gt 0 ]]; do
 done
 
 case "$COMMAND" in
-  build)  do_build ;;
-  test)   do_test ;;
-  audit)  do_audit ;;
-  lint)   do_lint ;;
-  clippy) do_clippy ;;
-  fmt)    do_fmt ;;
-  all)    do_all ;;
-  shell)  do_shell ;;
-  *)      usage; exit 1 ;;
+  build)      do_build ;;
+  test)       do_test ;;
+  audit)      do_audit ;;
+  lint)       do_lint ;;
+  clippy)     do_clippy ;;
+  fmt)        do_fmt ;;
+  shellcheck) do_shellcheck ;;
+  all)        do_all ;;
+  shell)      do_shell ;;
+  *)          usage; exit 1 ;;
 esac
