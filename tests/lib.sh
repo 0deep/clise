@@ -8,6 +8,7 @@ shopt -s extglob
 TESTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Workspace root (parent of tests/)
+# shellcheck disable=SC2034
 PROJECT_DIR="$(cd "$TESTS_DIR/.." && pwd)"
 
 # ---- .case file parsing -------------------------------------------------------
@@ -24,9 +25,10 @@ PROJECT_DIR="$(cd "$TESTS_DIR/.." && pwd)"
 #     banana
 #   expect_exact:                     # Entire block must be in saved file (partial match)
 #     ...
+# shellcheck disable=SC2034
 parse_case() {
   local file="$1"
-  # Store results in global variables
+  # Store results in global variables (read by test runners)
   CASE_ID=""; CASE_TITLE=""; CASE_FIXTURE=""; CASE_SCHEMA=""; CASE_SIZE="140x40"
   CASE_KEYS=(); CASE_CONTAINS=(); CASE_NOT_CONTAINS=(); CASE_EXACT=""
   local in_block="" line k v
@@ -83,7 +85,7 @@ parse_case() {
 
 # ---- Assertions ----------------------------------------------------------------
 assert_case() {
-  local saved="$1" rc=0 msg
+  local saved="$1" rc=0
   local content; content="$(cat "$saved" 2>/dev/null || true)"
   local c
   for c in "${CASE_CONTAINS[@]}"; do
@@ -104,6 +106,7 @@ assert_case() {
     if [[ "$content" != *"$trimmed"* ]]; then
       echo "    FAIL expect_exact (block not found)"
       echo "    Expected block:"
+      # shellcheck disable=SC2001
       sed 's/^/      /' <<<"$trimmed"
       rc=1
     fi

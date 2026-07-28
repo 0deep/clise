@@ -63,7 +63,7 @@ do_fmt() {
 
 do_shellcheck() {
   echo ">>> Running ShellCheck..."
-  run bash -c 'apt-get update -qq && apt-get install -y -qq shellcheck >/dev/null 2>&1; shellcheck *.sh'
+  run bash -c 'apt-get update -qq && apt-get install -y -qq shellcheck >/dev/null 2>&1; shellcheck *.sh tests/*.sh'
   echo ">>> ShellCheck complete"
 }
 
